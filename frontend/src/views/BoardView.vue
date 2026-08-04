@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted, computed, watch } from "vue";
+import { ref, onMounted, onUnmounted, computed, watch, nextTick } from "vue";
 import { api, wsUrl, authRoleRef, authReadyRef, loadAuthRole } from "../api.js";
 import { copyText } from "../clipboard.js";
 import { effectiveSeverity, buildReportMd, buildEdusrcToolReport } from "../report.js";
@@ -38,6 +38,7 @@ const directiveSending = ref(false);
 const cancellingEscalateId = ref(null);
 const expandedEventKeys = ref(new Set());
 const streamDetailLoading = ref({});
+const eventLogRef = ref(null);
 const readonly = computed(() => authRoleRef.value !== "full");
 const initialLoading = ref(false);
 const refreshing = ref(false);
@@ -333,11 +334,69 @@ let _traceUid = 0;
 // 去重键：落库 ts 与实时推送 ts 常有毫秒级差异（同一事件两个副本），
 // 用「kind + 轮次 + 文案 + 秒级时间」而非精确 ts 归并，才能真正去掉重复行。
 function traceDedupKey(ev) {
-  const sec = Math.floor(parseEventTs(ev.ts).getTime() / 1000);
+  const parsed = parseEventTs(ev._displayTs || ev.ts);
+  const sec = parsed ? Math.floor(parsed.getTime() / 1000) : 0;
   const text = ev._text || ev.message || ev.kind || "";
   return `${ev.kind || ""}|${ev.round || ""}|${text}|${sec}`;
 }
-function evEpoch(ev) { return parseEventTs(ev.ts).getTime(); }
+function evEpoch(ev) {
+  const parsed = parseEventTs(ev._displayTs || ev.ts);
+  return parsed ? parsed.getTime() : 0;
+}
+
+function eventRawTs(ev) {
+  return ev?.ts || ev?.created_at || ev?.createdAt || ev?.timestamp || ev?.time || "";
+}
+
+function streamEventStableKey(ev) {
+  const text = ev?._text || ev?.message || ev?.kind || "";
+  return [
+    ev?.agent || "",
+    ev?.kind || "",
+    ev?.level || "",
+    ev?.target_id || "",
+    ev?.round || "",
+    text,
+    ev?.error || "",
+  ].join("|");
+}
+
+function normalizeTimedEvent(ev, existingByKey = null) {
+  const text = ev._text || fmtEvent(ev) || ev.message || ev.kind;
+  if (!text) return null;
+  const withText = { ...ev, _text: text };
+  const raw = eventRawTs(withText);
+  let displayTs = "";
+  if (parseEventTs(raw)) {
+    displayTs = raw;
+  } else {
+    const previous = existingByKey?.get(streamEventStableKey(withText));
+    displayTs = previous?._displayTs || previous?.ts || new Date().toISOString();
+  }
+  return {
+    ...withText,
+    // Activity Stream 自己也需要稳定 uid。不能用 v-for 下标做 key：
+    // 新事件插到顶部会让下标整体变化，展开状态会被误关。
+    _uid: withText._uid ?? existingByKey?.get(streamEventStableKey(withText))?._uid ?? ++_traceUid,
+    // 缺失/非法 ts 只在进入列表时固化一次。后续轮询复用 _displayTs，
+    // 避免错误事件每次渲染都回退到当前时间，看起来像时间一直在增加。
+    ts: raw || displayTs,
+    _displayTs: displayTs,
+  };
+}
+
+function prependStreamEvent(item) {
+  const el = eventLogRef.value;
+  const shouldPreserveScroll = !!el && el.scrollTop > 4;
+  const beforeHeight = el?.scrollHeight || 0;
+  events.value.unshift(item);
+  if (events.value.length > 200) events.value.length = 200;
+  if (!shouldPreserveScroll) return;
+  nextTick(() => {
+    if (!eventLogRef.value) return;
+    eventLogRef.value.scrollTop += eventLogRef.value.scrollHeight - beforeHeight;
+  });
+}
 
 function pushLiveTrace(ev) {
   const tid = ev.target_id;
@@ -345,7 +404,7 @@ function pushLiveTrace(ev) {
   const map = { ...liveTraceByTarget.value };
   const list = [...(map[tid] || [])];
   // 兜底：万一某条实时事件没带 ts，落地为「收到时刻」的固定时间，
-  // 避免 parseEventTs 回退成 new Date() 导致所有行都显示当前时间、且每次刷新一起变。
+  // 避免缺失时间导致所有行都显示当前时间、且每次刷新一起变。
   const item = { ...ev, ts: ev.ts || new Date().toISOString(), _text: fmtEvent(ev) || ev.kind, _uid: ++_traceUid };
   // 近端去重：同一事件的落库/实时两个副本只会挨得很近，扫最近若干条即可。
   const key = traceDedupKey(item);
@@ -361,8 +420,9 @@ function pushLiveTrace(ev) {
   }
 }
 
-function eventExpandKey(ev, i) {
-  return `${ev.target_id || ""}|${ev.ts || ""}|${ev.kind || ""}|${i}`;
+function eventExpandKey(ev) {
+  if (ev?._uid != null) return `u${ev._uid}`;
+  return streamEventStableKey(ev);
 }
 
 function canExpandEvent(ev) {
@@ -576,10 +636,11 @@ async function loadBoard() {
     if (b.llm_usage) task.value.llm_usage = b.llm_usage;
   }
   if (!events.value.length && b.events?.length) {
+    const existingByKey = new Map(events.value.map((e) => [streamEventStableKey(e), e]));
     events.value = b.events
       .filter(isImportantEvent)
-      .map((e) => ({ ...e, _text: fmtEvent(e) }))
-      .filter((e) => e._text);
+      .map((e) => normalizeTimedEvent(e, existingByKey))
+      .filter(Boolean);
   }
 }
 
@@ -604,9 +665,8 @@ function connectWs() {
     if (ev.kind === "collector_phase") updateCollectorStatus(ev);
     const text = fmtEvent(ev);
     if (!text) return;
-    // 同 pushLiveTrace：缺 ts 的事件落地为「收到时刻」，避免活动流也出现全体显示当前时间。
-    events.value.unshift({ ...ev, ts: ev.ts || new Date().toISOString(), _text: text });
-    if (events.value.length > 200) events.value.length = 200;
+    const item = normalizeTimedEvent({ ...ev, _text: text });
+    prependStreamEvent(item);
     const k = ev.kind || "";
     if (k.includes("finding") || k.includes("review") || k.includes("target_done")
         || k.includes("submit") || k.includes("killsweep") || k.includes("worker")
@@ -1020,15 +1080,19 @@ const resolvedTargets = computed(() =>
   (stats.value.done ?? 0) + (stats.value.dead ?? 0) + (stats.value.skipped ?? 0)
 );
 const collectorCfg = computed(() => task.value?.fofa_config || {});
-// 搜集阶段判定：搜集器还在跑（有 phase 且未到 dispatch）就视为搜集中，
-// 即使已有部分目标入队。这样搜集+处置并行期主进度条保持不确定动画，
-// 不会因 totalTargets 分批增长而导致 resolved/total 进度倒退。
-// 手动/单站模式无搜集器 phase，首批目标入队后即切到确定性进度。
+// 搜集阶段判定：只有「活跃搜集阶段」(fofa_search/prefilter/scoring/target_filter/enrich)
+// 才算搜集中——主进度条走不确定动画 + collectorPct。终态/待命阶段一律不算搜集，
+// 即便 24×7 自动补队列让搜集器常驻待命也一样：
+//   dispatch=派发完成，idle=队列充足待命/手动清单入队完成，
+//   exhausted=FOFA 已翻尽，fofa_error=搜集出错。
+// 这些阶段必须切到「处置进度」(resolved/total)，否则 collectorPct 会兜底成无意义的 25%，
+// 让手动清单等入队完成后永久停在「25% 搜集进度」。
+const COLLECT_DONE_PHASES = new Set(["dispatch", "idle", "exhausted", "fofa_error"]);
 const isCollecting = computed(() => {
   if (task.value?.status !== "running") return false;
   const phase = collectorCfg.value.collector_phase;
-  if (phase && phase !== "dispatch") return true;    // 搜集器在跑
-  if (!phase && totalTargets.value === 0) return true; // 初始化（还没收到 phase）
+  if (phase) return !COLLECT_DONE_PHASES.has(phase); // 仅活跃搜集阶段算搜集中
+  if (totalTargets.value === 0) return true;          // 无 phase 且尚无目标 = 初始化中
   return false;
 });
 const collectorPct = computed(() => {
@@ -1047,8 +1111,8 @@ const progressPct = computed(() => {
   return totalTargets.value ? Math.round((resolvedTargets.value / totalTargets.value) * 100) : 0;
 });
 const collectorVisible = computed(() => {
-  // 过滤/入队完成后（phase=dispatch）自动隐藏，不再占位。
-  if (collectorCfg.value.collector_phase === "dispatch") return false;
+  // 搜集终态/待命（dispatch/idle/exhausted/fofa_error）自动隐藏，不占位、不显示无意义的 25% 条。
+  if (COLLECT_DONE_PHASES.has(collectorCfg.value.collector_phase)) return false;
   // 搜集阶段即使没收到 collector_phase 事件也立即显示，
   // 消除"启动后空窗期体感空闲"的问题。
   if (isCollecting.value) return true;
@@ -1188,15 +1252,18 @@ function onDrawerUpdated() {
   refreshFromEvent({ kind: "review_updated" });
 }
 function evTime(ev) {
-  const d = parseEventTs(ev.ts);
+  const d = parseEventTs(ev._displayTs || ev.ts);
+  if (!d) return "-";
   return d.toLocaleTimeString("zh-CN", { hour12: false });
 }
 function parseEventTs(ts) {
-  if (!ts) return new Date();
+  if (!ts) return null;
   // 后端时间统一是 UTC。带时区标识（Z/+/-）直接解析；
   // 万一是无时区的 naive 串（如 2026-06-27T02:29:00），按 UTC 补 Z，避免被当本地时区差 8 小时。
   const hasTz = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(ts);
-  return new Date(hasTz ? ts : `${ts}Z`);
+  const d = new Date(hasTz ? ts : `${ts}Z`);
+  if (Number.isNaN(d.getTime())) return null;
+  return d;
 }
 </script>
 
@@ -1470,7 +1537,7 @@ function parseEventTs(ts) {
           <span>Activity Stream</span>
           <small>点击带目标的行展开细节</small>
         </div>
-        <div class="event-log">
+        <div ref="eventLogRef" class="event-log">
           <div v-if="!events.length" class="empty sm">等待事件…</div>
           <template v-for="(ev, i) in events" :key="eventExpandKey(ev, i)">
             <div
