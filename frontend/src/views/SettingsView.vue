@@ -13,6 +13,13 @@ const llmTest = ref(null);
 const singleModels = ref([]);
 const singleModelsLoading = ref(false);
 const singleModelsError = ref("");
+// 工作目录管理状态
+const workdirLoading = ref(false);
+const workdirCleaning = ref(false);
+const workdirStats = ref(null);
+const workdirResult = ref(null);
+const cleanupRetentionDays = ref(7);
+const cleanupDryRun = ref(true);
 /** 自动保存状态：idle | pending | saving | saved | error | incomplete */
 const autoSaveStatus = ref("idle");
 const autoSaveError = ref("");
@@ -702,12 +709,45 @@ onMounted(async () => {
   healthPoll = setInterval(() => refreshProviderHealth().catch(() => {}), 10000);
   // 探测后端是否支持更新 API（原版不注册 → supported=false → 隐藏区块）
   checkUpdate();
+  loadWorkdirStats();
 });
 onUnmounted(() => {
   clearInterval(healthPoll);
   clearInterval(restartPoll);
   clearTimeout(autoSaveTimer);
 });
+
+async function loadWorkdirStats() {
+  workdirLoading.value = true;
+  try {
+    workdirStats.value = await api.workdirStats();
+    if (workdirStats.value) {
+      cleanupRetentionDays.value = workdirStats.value.retention_days || 7;
+    }
+  } catch (e) {
+    toast(String(e.message || e).replace(/^\d+\s*/, ""));
+  } finally {
+    workdirLoading.value = false;
+  }
+}
+
+async function runCleanup() {
+  workdirCleaning.value = true;
+  workdirResult.value = null;
+  try {
+    const res = await api.workdirCleanup(cleanupRetentionDays.value, cleanupDryRun.value);
+    workdirResult.value = res;
+    const prefix = res.dry_run ? "模拟清理" : "清理";
+    toast(`${prefix}完成：删除 ${res.deleted_dirs} 个目录，释放 ${res.freed_human}`);
+    if (!res.dry_run) {
+      await loadWorkdirStats();
+    }
+  } catch (e) {
+    toast(String(e.message || e).replace(/^\d+\s*/, ""));
+  } finally {
+    workdirCleaning.value = false;
+  }
+}
 </script>
 
 <template>
@@ -966,7 +1006,7 @@ onUnmounted(() => {
             <label class="full">默认搜集方式
               <select v-model="form.default_intent_mode">
                 <option value="">自动判断</option>
-                <option value="syntax">查询语法（FOFA 语法或当前引擎原生均可）</option>
+                <option value="syntax">查询语法（当前引擎官网语法）</option>
                 <option value="intent">自然语言意图</option>
               </select>
             </label>
@@ -986,8 +1026,15 @@ onUnmounted(() => {
               <div class="settings-grid" v-if="form.engines[eng.name]">
                 <label class="full">API Key
                   <input v-model="form.engines[eng.name].key" type="password"
-                    :placeholder="form.engines[eng.name]?.key_set ? '已配置，留空不修改' : `${eng.display_name || eng.name} API Key`" />
+                    :placeholder="form.engines[eng.name]?.key_set ? '已配置，留空不修改' : (
+                      eng.name === 'censys' ? 'Platform Personal Access Token，或旧版 API_ID:SECRET' :
+                      eng.name === 'quake' ? 'X-QuakeToken（个人中心 API Token）' :
+                      ((eng.display_name || eng.name) + ' API Key')
+                    )" />
                 </label>
+                <p v-if="eng.name === 'censys'" class="field-hint full">
+                  新账号用 Censys Platform 的 Personal Access Token；仅旧 Legacy Search 才填 <code>API_ID:SECRET</code>。
+                </p>
                 <label class="full">API 端点（可选）
                   <input v-model="form.engines[eng.name].base_url"
                     :placeholder="eng.name === 'fofa' ? 'https://fofa.info' : '留空用官方默认'" />
@@ -1008,6 +1055,89 @@ onUnmounted(() => {
               <input v-model="form.skip_score_threshold" type="number" step="1" />
             </label>
             <p class="field-hint full">Collector 评分低于此值的目标直接跳过，避免 worker 消耗在垃圾资产上。</p>
+          </div>
+        </fieldset>
+
+        <fieldset class="settings-block">
+          <legend>
+            <span>工作目录管理</span>
+            <small>Worker / Escalate 等 agent 产生的临时文件磁盘占用与清理</small>
+          </legend>
+          <div v-if="workdirLoading" class="field-hint">加载中…</div>
+          <div v-else-if="workdirStats" class="workdir-panel">
+            <div class="workdir-stats-grid">
+              <div class="workdir-stat-item">
+                <span class="workdir-stat-label">磁盘占用</span>
+                <b class="workdir-stat-value">{{ workdirStats.total_size_human }}</b>
+              </div>
+              <div class="workdir-stat-item">
+                <span class="workdir-stat-label">目标目录数</span>
+                <b class="workdir-stat-value">{{ workdirStats.total_dirs }}</b>
+              </div>
+              <div class="workdir-stat-item">
+                <span class="workdir-stat-label">自动清理</span>
+                <b class="workdir-stat-value" :class="workdirStats.auto_cleanup_enabled ? 'on' : 'off'">
+                  {{ workdirStats.auto_cleanup_enabled ? `已开启（${workdirStats.retention_days}天）` : '已关闭' }}
+                </b>
+              </div>
+              <div v-if="workdirStats.oldest_dir" class="workdir-stat-item">
+                <span class="workdir-stat-label">最旧目录</span>
+                <b class="workdir-stat-value small">{{ workdirStats.oldest_dir.age_days }}天前</b>
+              </div>
+            </div>
+            <p class="field-hint">工作路径：<code>{{ workdirStats.work_root }}</code></p>
+            <p v-if="workdirStats.auto_cleanup_enabled" class="field-hint">
+              系统将自动清理超过 {{ workdirStats.retention_days }} 天未修改的工作目录（间隔由 WORKER_WORK_CLEANUP_INTERVAL_HOURS 控制，默认 6 小时）。
+            </p>
+
+            <div class="workdir-cleanup-controls">
+              <label class="workdir-retention-label">
+                清理保留天数
+                <input v-model.number="cleanupRetentionDays" type="number" min="0" max="365" />
+              </label>
+              <label class="workdir-dryrun-label">
+                <input type="checkbox" v-model="cleanupDryRun" />
+                模拟运行（不实际删除）
+              </label>
+              <button type="button" :disabled="workdirCleaning" @click="runCleanup">
+                {{ workdirCleaning ? "清理中…" : (cleanupDryRun ? "模拟清理" : "执行清理") }}
+              </button>
+              <button type="button" @click="loadWorkdirStats" :disabled="workdirLoading">
+                刷新统计
+              </button>
+            </div>
+
+            <div v-if="workdirResult" class="workdir-result">
+              <div class="workdir-result-summary">
+                <span>{{ workdirResult.dry_run ? "模拟清理" : "清理" }}完成</span>
+                <span>扫描 {{ workdirResult.scanned_dirs }} 个目录</span>
+                <span>删除 {{ workdirResult.deleted_dirs }} 个</span>
+                <span v-if="workdirResult.failed_dirs">失败 {{ workdirResult.failed_dirs }} 个</span>
+                <span>释放 {{ workdirResult.freed_human }}</span>
+              </div>
+              <details v-if="workdirResult.deleted?.length" class="workdir-result-details">
+                <summary>已清理目录（{{ workdirResult.deleted.length }}）</summary>
+                <div class="workdir-result-list">
+                  <div v-for="d in workdirResult.deleted.slice(0, 100)" :key="d.name" class="workdir-result-item">
+                    <span class="workdir-item-name">{{ d.name }}</span>
+                    <span class="workdir-item-age">{{ d.age_days }}天</span>
+                    <span class="workdir-item-size">{{ d.size_human }}</span>
+                  </div>
+                  <p v-if="workdirResult.deleted.length > 100" class="field-hint">
+                    仅显示前 100 条，共 {{ workdirResult.deleted.length }} 条
+                  </p>
+                </div>
+              </details>
+              <details v-if="workdirResult.failed?.length" class="workdir-result-details">
+                <summary>失败目录（{{ workdirResult.failed.length }}）</summary>
+                <div class="workdir-result-list">
+                  <div v-for="d in workdirResult.failed" :key="d.name" class="workdir-result-item">
+                    <span class="workdir-item-name">{{ d.name }}</span>
+                    <span class="workdir-item-age">{{ d.error }}</span>
+                  </div>
+                </div>
+              </details>
+            </div>
           </div>
         </fieldset>
 

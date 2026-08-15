@@ -124,6 +124,7 @@ Powered By **StanleyNull** · 作者 EduSRC 主页：<https://src.sjtu.edu.cn/pr
 
 > [!WARNING]
 > **仅限对已获明确书面授权的目标使用。** 本工具遵循 CC BY-NC 4.0，禁止任何商业用途，滥用后果自负。
+还有，本工具做了删除限制，但是仍有可能在某些外部情况如模型自主意愿等情况下修改或删除少量数据，本工具造成的一切后果请后果自负，请在完全了解的情况下使用!使用本工具出现的问题可以提出意见我来修改，但请不要怪到我本人或者我们团队🤔
 
 > [!NOTE]
 > 🌱 本项目为 **Demo 级别**，作者抛砖引玉，欢迎 Star / Issue / 二次开发。
@@ -303,6 +304,21 @@ body="管理" && org="China Education and Research Network Center"
 | `port=` / `country=` | 端口 / 国家 | `port="8080" && country="CN"` |
 
 组合逻辑：`&&`（且）、`||`（或）、`!=`（非）。**语句越精确、归属越收窄，Worker 越不会打到范围外资产。**
+
+任务里还可把搜索引擎换成 **360 Quake / Hunter / ZoomEye / Shodan / Censys**（设置页配对应 Key）。查询框两种写法都认：
+
+1. **FOFA 语法**（推荐统一这么写）→ 请求前自动翻译到当前引擎
+2. **该引擎官网原生语法** → 识别后原样请求，不再二次翻译
+
+| 引擎 | 原生示例 | Key |
+|------|----------|-----|
+| 360 Quake | `title:"登录" AND domain:"edu.cn"` | `QUAKE_KEY`（个人中心 API Token） |
+| Hunter | `web.title="登录" && domain.suffix="edu.cn"` | `HUNTER_KEY` |
+| ZoomEye | `title="login" && country="CN"` | `ZOOMEYE_KEY` |
+| Shodan | `http.title:"nginx" port:443` | `SHODAN_KEY`（需 Search API 权限） |
+| Censys | `host.dns.names: edu.cn` | `CENSYS_KEY`（Platform Personal Access Token；旧账号才用 `API_ID:SECRET`） |
+
+> 选了 Quake 却从官网粘 `title:"xxx" AND ...` 时，请把搜集方式设为「查询语法」或保持自动判断——系统会按原生语法直发，不再当成自然语言改写。
 
 > [!IMPORTANT]
 > **务必收窄授权范围**：只搜你有权限测试的资产。`org` / `domain` / `cert` 是最有效的归属过滤手段。

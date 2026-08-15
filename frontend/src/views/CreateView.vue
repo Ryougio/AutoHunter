@@ -53,6 +53,36 @@ const engineLabel = computed(() => {
   const map = { fofa: "FOFA", quake: "360 Quake", hunter: "Hunter", zoomeye: "ZoomEye", shodan: "Shodan", censys: "Censys" };
   return map[form.engine] || (form.engine ? form.engine : "系统默认引擎");
 });
+const engineKey = computed(() => form.engine || "fofa");
+const queryPlaceholder = computed(() => {
+  if (form.intent_mode === "intent") {
+    return form.src_type === "enterprise"
+      ? "例：找某集团 OA/CRM/ERP/API/运维后台资产"
+      : "例：找全国高校的统一身份认证登录系统";
+  }
+  const samples = {
+    fofa: form.src_type === "enterprise"
+      ? 'domain="example.com" || cert="示例集团" || org="示例集团"'
+      : 'title="统一身份认证" && domain=".edu.cn"',
+    quake: 'title:"统一身份认证" AND domain:"edu.cn"',
+    hunter: 'ip.isp="中国教育网"&&header.status_code="200"',
+    zoomeye: 'title="统一身份认证" && country="CN"',
+    shodan: 'http.title:"login" hostname:edu.cn',
+    censys: 'host.services.http.response.html_title:"Login" and host.dns.names: edu.cn',
+  };
+  return samples[engineKey.value] || samples.fofa;
+});
+const queryHintSample = computed(() => {
+  const samples = {
+    fofa: 'title="统一身份认证" && domain=".edu.cn"',
+    quake: 'title:"登录" AND domain:"edu.cn"',
+    hunter: 'ip.isp="中国教育网"&&header.status_code="200"',
+    zoomeye: 'title="login" && country="CN"',
+    shodan: 'http.title:"nginx" port:443',
+    censys: 'host.dns.names: edu.cn',
+  };
+  return samples[engineKey.value] || samples.fofa;
+});
 
 const manualTargetsPlaceholder = computed(() =>
   isSiteMode.value
@@ -256,20 +286,17 @@ onMounted(async () => {
       <label v-if="!isSiteMode">搜集方式
         <select v-model="form.intent_mode">
           <option value="">自动判断（写得像语法就当语法，否则当意图）</option>
-          <option value="syntax">查询语法（FOFA 或当前引擎原生均可）</option>
+          <option value="syntax">查询语法（当前引擎官网语法，原样请求）</option>
           <option value="intent">自然语言意图（让搜集 Agent 翻译成语法并逐轮演化）</option>
         </select>
       </label>
       <label v-if="!isSiteMode">
         {{ form.intent_mode === "intent" ? "搜集意图（用大白话说要找什么）" : "查询语法 / 搜集意图" }}
-        <input v-model="form.fofa_query"
-          :placeholder="form.src_type === 'enterprise'
-            ? (form.intent_mode === 'intent' ? '例：找某集团 OA/CRM/ERP/API/运维后台资产' : 'domain=&quot;example.com&quot; || cert=&quot;示例集团&quot; || org=&quot;示例集团&quot;')
-            : (form.intent_mode === 'intent' ? '例：找全国高校的统一身份认证登录系统' : 'title=&quot;统一身份认证&quot; && domain=&quot;.edu.cn&quot;')" />
+        <input v-model="form.fofa_query" :placeholder="queryPlaceholder" />
       </label>
       <p v-if="!isSiteMode && form.intent_mode !== 'intent'" class="field-hint">
-        两种写法都可用：① <strong>FOFA 语法</strong>（换引擎会自动翻译）；② <strong>当前引擎原生语法</strong>（识别后原样请求，不二次翻译）。
-        例 Quake：<code>title:"登录" AND domain:"edu.cn"</code>；Hunter：<code>web.title="登录" && domain.suffix="edu.cn"</code>。
+        选了哪个引擎就写哪个引擎的官网语法，<strong>原样请求，不再从 FOFA 翻译</strong>。
+        当前引擎示例：<code>{{ queryHintSample }}</code>
       </p>
       <label v-else>目标相关信息 / 协作重点
         <textarea v-model="form.fofa_query" rows="4" placeholder="可写：重点方向、后台位置等协作备注。登录凭据请填下方「登录凭据区」。&#10;例：后台在 /admin，重点测 API、越权、上传。"></textarea>
@@ -381,9 +408,12 @@ onMounted(async () => {
         </p>
         <label>worker 并发 <input v-model="form.concurrency" type="number" /></label>
       </details>
-      <label>SRC 规则（审核用，可留空，审核 agent 已内置{{ form.src_type === 'enterprise' ? '企业SRC' : 'edusrc' }}标准）
-        <textarea v-model="form.src_rules" rows="3"></textarea>
+      <label>SRC 规则（可选，叠加在内置标准上，不替换）
+        <textarea v-model="form.src_rules" rows="3" placeholder="例：本校不收弱口令；重点收越权与未授权。"></textarea>
       </label>
+      <p class="field-hint">
+        审核与挖掘已内置{{ form.src_type === 'enterprise' ? '企业SRC' : 'EduSRC' }}标准。这里只追加本任务额外要求；留空则只用内置标准。与内置冲突时按更严的执行，不能放宽红线。
+      </p>
       <button type="submit" class="primary" :disabled="submitting">{{ submitting ? "创建中…" : "创建任务" }}</button>
     </form>
   </section>
