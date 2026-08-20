@@ -16,12 +16,13 @@ from sqlalchemy import case, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent_runtime import AGENT_EXECUTOR, agent_semaphore
-from app.agents.deepen import apply_deepen
+from app.agents.deepen import apply_deepen, deepen_cap_for
 from app.agents.write_proof import looks_like_write_op
 from app.settings_service import llm_client_for_task
 from app.db.models import Finding, Killsweep, Review, Target, Task, TaskEvent, to_cst_iso
 from app.db.session import get_session
 from app.events import bus
+from app.killsweep_status import killsweep_retryable
 from app.llm.client import LLMClient, LLMError
 from app.tools.executor import ToolExecutor
 
@@ -423,12 +424,14 @@ async def restore_archived(finding_id: str, session: AsyncSession = Depends(get_
 
 
 @router.get("/tasks/{task_id}/killsweeps")
-async def killsweep_list(task_id: str, only_hits: bool = True,
+async def killsweep_list(task_id: str, only_hits: bool = False,
+                         include_invalid: bool = False,
                          search: Optional[str] = Query(None, alias="q"),
                          session: AsyncSession = Depends(get_session)):
-    """通杀列：人工复审通过后由通杀 Hunter 产出的可通杀候选。
+    """通杀列：人工复审通过后，无论是否命中同款站、是否分析失败，都会进入此列。
 
-    默认只返回 is_killsweep=true 的命中项，避免把不可通杀分析噪音摆到主列表里。
+    only_hits=true 时只返回判定可通杀的命中项（旧行为）。
+    默认隐藏人工标记无效的记录。
     """
     q = (
         select(Killsweep, Finding.title)
@@ -437,7 +440,19 @@ async def killsweep_list(task_id: str, only_hits: bool = True,
     )
     if only_hits:
         q = q.where(Killsweep.is_killsweep == True)  # noqa: E712
-    q = q.order_by(Killsweep.verified.desc(), Killsweep.asset_count.desc(), Killsweep.created_at.desc())
+    if not include_invalid:
+        q = q.where(Killsweep.status != "invalid")
+    q = q.order_by(
+        case(
+            (Killsweep.status == "analyzing", 0),
+            (Killsweep.status == "failed", 1),
+            (Killsweep.status == "cancelled", 2),
+            else_=3,
+        ),
+        Killsweep.is_killsweep.desc(),
+        Killsweep.verified.desc(),
+        Killsweep.created_at.desc(),
+    )
     rows = (await session.execute(q)).all()
     out = []
     for k, origin_title in rows:
@@ -454,12 +469,14 @@ async def killsweep_list(task_id: str, only_hits: bool = True,
             "asset_count": k.asset_count,
             "edu_count": k.edu_count,
             "is_killsweep": k.is_killsweep,
+            "has_sites": bool(k.is_killsweep and ((k.affected_table or []) or k.verified_url)),
             "confidence": k.confidence,
             "verified_url": k.verified_url,
             "verified": k.verified,
             "affected_table": k.affected_table or [],
             "notes": k.notes,
             "status": k.status,
+            "retryable": killsweep_retryable(k.status, bool(k.is_killsweep)),
             "created_at": to_cst_iso(k.created_at),
             "updated_at": to_cst_iso(k.updated_at),
         }
@@ -486,13 +503,12 @@ async def invalidate_killsweep(task_id: str, killsweep_id: str,
                                session: AsyncSession = Depends(get_session)):
     """人工把通杀候选标记为无效。
 
-    默认通杀列表只返回 is_killsweep=true，因此置 false 后会立刻从主列表消失；
-    原始记录保留在 DB 里，便于后续审计或人工回捞。
+    默认通杀列表隐藏 status=invalid 的记录；原始记录保留在 DB 里，便于后续审计或人工回捞。
     """
     k = await session.get(Killsweep, killsweep_id)
     if not k or k.task_id != task_id:
         raise HTTPException(404, "通杀记录不存在")
-    if k.status == "invalid" or not k.is_killsweep:
+    if k.status == "invalid":
         return {"ok": True, "id": k.id, "status": k.status or "invalid", "already_invalid": True}
     reason = ((req.reason if req else "") or "人工标记无效").strip()[:500]
     now = _now()
@@ -522,6 +538,42 @@ async def invalidate_killsweep(task_id: str, killsweep_id: str,
     return {"ok": True, "id": k.id, "status": k.status}
 
 
+@router.post("/tasks/{task_id}/killsweeps/{killsweep_id}/retry")
+async def retry_killsweep(task_id: str, killsweep_id: str,
+                          session: AsyncSession = Depends(get_session)):
+    """重启通杀 Hunter：LLM/中转站抖动失败后，不必把复审改回 pending。"""
+    k = await session.get(Killsweep, killsweep_id)
+    if not k or k.task_id != task_id:
+        raise HTTPException(404, "通杀记录不存在")
+    if not killsweep_retryable(k.status, bool(k.is_killsweep)):
+        if k.status == "invalid":
+            raise HTTPException(400, "已标记无效的通杀记录不能重启")
+        raise HTTPException(400, "已有通杀命中，无需重启")
+    finding_id = (k.origin_finding_id or "").strip()
+    if not finding_id:
+        raise HTTPException(400, "缺少源漏洞，无法重启")
+    f = await session.get(Finding, finding_id)
+    if not f or f.task_id != task_id:
+        raise HTTPException(404, "源漏洞不存在")
+    from app.orchestrator import manager
+    runner = manager._runners.get(task_id)
+    if runner and finding_id in runner._killsweep_inflight:
+        raise HTTPException(409, "通杀正在运行，请稍后再试")
+    started = await manager.trigger_killsweep(task_id, finding_id)
+    if not started:
+        raise HTTPException(409, "通杀正在运行，请稍后再试")
+    session.add(TaskEvent(
+        task_id=task_id,
+        agent="killsweep",
+        kind="killsweep_retry",
+        level="info",
+        message=f"手动重启通杀分析：{k.product_name or k.vuln_summary or finding_id}",
+        payload={"killsweep_id": k.id, "finding_id": finding_id},
+    ))
+    await session.commit()
+    return {"ok": True, "id": k.id, "finding_id": finding_id, "status": "analyzing"}
+
+
 class ReportAssistantRequest(BaseModel):
     message: str
     history: list[dict] = []  # 兼容旧前端；优先使用 DB 持久化历史
@@ -542,6 +594,8 @@ REPORT_ASSISTANT_TOOLS = [
                     "data": {"type": "string"},
                     "json_body": {"type": "object"},
                     "follow_redirects": {"type": "boolean", "default": False},
+                    "confirm_destructive": {"type": "boolean", "default": False},
+                    "confirm_reason": {"type": "string"},
                 },
                 "required": ["url"],
             },
@@ -557,6 +611,8 @@ REPORT_ASSISTANT_TOOLS = [
                 "properties": {
                     "command": {"type": "string"},
                     "timeout": {"type": "integer", "default": 30},
+                    "confirm_destructive": {"type": "boolean", "default": False},
+                    "confirm_reason": {"type": "string"},
                 },
                 "required": ["command"],
             },
@@ -686,6 +742,8 @@ def _tool_result_summary(name: str, result: dict) -> str:
     """把工具结果浓缩成一句关键信息，给前端实时展示。"""
     if not isinstance(result, dict):
         return str(result)[:200]
+    if result.get("needs_confirm"):
+        return f"需反思确认：{result.get('error', '')}"[:200]
     if result.get("blocked"):
         return f"已拦截：{result.get('error', '')}"[:200]
     if result.get("ok") is False:
@@ -857,6 +915,8 @@ def _run_report_assistant_loop(
                         headers=args.get("headers"), data=args.get("data"),
                         json_body=args.get("json_body"), follow_redirects=args.get("follow_redirects", False),
                         timeout=20,
+                        confirm_destructive=args.get("confirm_destructive", False),
+                        confirm_reason=args.get("confirm_reason") or "",
                     )
             elif tc.function.name == "run_shell":
                 command = _clean_shell_command(args.get("command") or "")
@@ -866,7 +926,11 @@ def _run_report_assistant_loop(
                 if not command:
                     result = {"ok": False, "error": "run_shell 缺少 command"}
                 else:
-                    result = executor.run_shell(command, timeout=timeout)
+                    result = executor.run_shell(
+                        command, timeout=timeout,
+                        confirm_destructive=args.get("confirm_destructive", False),
+                        confirm_reason=args.get("confirm_reason") or "",
+                    )
             else:
                 result = {"ok": False, "error": f"未知工具: {tc.function.name}"}
             tool_logs.append({"tool": tc.function.name, "args": args, "result": result})
@@ -1142,7 +1206,9 @@ async def user_deepen(finding_id: str, req: DeepenRequest,
         raise HTTPException(404, "漏洞不存在")
     r = (await session.execute(select(Review).where(Review.finding_id == finding_id))).scalar_one_or_none()
     tgt = await session.get(Target, f.target_id)
-    ok, suffix = apply_deepen(session, f, tgt, directive, source="user")
+    task_row = await session.get(Task, f.task_id) if f.task_id else None
+    ok, suffix = apply_deepen(session, f, tgt, directive, source="user",
+                              cap=deepen_cap_for(task_row))
     if not ok:
         # 深挖失败：回滚一切改动，绝不把 user_status 污染成 deepening，
         # 否则该漏洞会从复审/驳回列表消失又进不了深挖，变成查不到的"幽灵数据"。

@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { api } from "../api.js";
 import LlmModelPicker from "../components/LlmModelPicker.vue";
+import { copyText, formatLlmTestCopy } from "../clipboard.js";
 
 const loading = ref(true);
 const saving = ref(false);
@@ -20,6 +21,13 @@ const workdirStats = ref(null);
 const workdirResult = ref(null);
 const cleanupRetentionDays = ref(7);
 const cleanupDryRun = ref(true);
+const backupLoading = ref(false);
+const backupBusy = ref("");
+const backupStats = ref(null);
+const backupIncludeWork = ref(false);
+const restoreIncludeWork = ref(false);
+const restoreFile = ref(null);
+const backupRestarting = ref(false);
 /** 自动保存状态：idle | pending | saving | saved | error | incomplete */
 const autoSaveStatus = ref("idle");
 const autoSaveError = ref("");
@@ -89,13 +97,15 @@ function pollHealth() {
       const r = await fetch("/health");
       if (r.ok) {
         clearInterval(restartPoll);
+        const fromBackup = backupRestarting.value;
         updateState.restarting = false;
-        toast("更新完成，服务已重启 🎉");
+        backupRestarting.value = false;
+        toast(fromBackup ? "备份恢复完成，服务已重启" : "更新完成，服务已重启 🎉");
         updateState.info = null;
         load();
       }
     } catch {}
-    if (attempts > 60) { clearInterval(restartPoll); updateState.restarting = false; updateState.error = "重启超时，请手动刷新页面"; }
+    if (attempts > 60) { clearInterval(restartPoll); updateState.restarting = false; backupRestarting.value = false; updateState.error = "重启超时，请手动刷新页面"; }
   }, 3000);
 }
 
@@ -118,6 +128,7 @@ const form = reactive({
   engines: {},
   available_engines: [],
   concurrency: 3,
+  deepen_cap: 2,
   skip_score_threshold: -10,
   worker_prompt_version: "legacy",
 });
@@ -336,6 +347,7 @@ function resultText(item) {
   if (item.protocol) parts.push(item.protocol);
   if (item.model) parts.push(item.model);
   if (item.latency_ms) parts.push(`${item.latency_ms}ms`);
+  if (item.status_code) parts.push(`HTTP ${item.status_code}`);
   if (item.ok && item.reply) parts.push(`reply: ${item.reply}`);
   if (item.ok && item.tool_calling) {
     const tc = {
@@ -347,6 +359,12 @@ function resultText(item) {
   }
   if (!item.ok && item.error) parts.push(item.error);
   return parts.filter(Boolean).join(" · ");
+}
+
+async function copyLlmTest(item) {
+  const text = item ? formatLlmTestCopy({ ok: item.ok, results: [item], error_copy: item.error_copy }) : formatLlmTestCopy(llmTest.value || {});
+  const ok = await copyText(text);
+  toast(ok ? "已复制 LLM 错误信息" : "复制失败，请手动选中");
 }
 
 function applyLlmHealthResults(results = []) {
@@ -546,6 +564,7 @@ async function load() {
     }
     form.engines = nextEngines;
     form.concurrency = s.defaults?.concurrency ?? 3;
+    form.deepen_cap = s.defaults?.deepen_cap ?? 2;
     form.skip_score_threshold = s.defaults?.skip_score_threshold ?? -10;
     form.worker_prompt_version = s.defaults?.worker_prompt_version || "legacy";
     autoSaveStatus.value = "idle";
@@ -618,6 +637,7 @@ async function save({ silent = false } = {}) {
       engines: {},
       defaults: {
         concurrency: Number(form.concurrency),
+        deepen_cap: Number(form.deepen_cap),
         skip_score_threshold: Number(form.skip_score_threshold),
         worker_prompt_version: form.worker_prompt_version,
         engine: form.default_engine || "fofa",
@@ -710,12 +730,87 @@ onMounted(async () => {
   // 探测后端是否支持更新 API（原版不注册 → supported=false → 隐藏区块）
   checkUpdate();
   loadWorkdirStats();
+  loadBackupStats();
 });
 onUnmounted(() => {
   clearInterval(healthPoll);
   clearInterval(restartPoll);
   clearTimeout(autoSaveTimer);
 });
+
+async function loadBackupStats() {
+  backupLoading.value = true;
+  try {
+    backupStats.value = await api.backupStatus();
+  } catch (e) {
+    toast(String(e.message || e).replace(/^\d+\s*/, ""));
+  } finally {
+    backupLoading.value = false;
+  }
+}
+
+function pollBackupRestart() {
+  backupRestarting.value = true;
+  pollHealth();
+}
+
+async function exportBackup() {
+  backupBusy.value = "export";
+  try {
+    await api.downloadBackupExport(backupIncludeWork.value);
+    toast(backupIncludeWork.value ? "已开始下载（含工作目录）" : "已开始下载数据库备份");
+  } catch (e) {
+    toast(String(e.message || e).replace(/^\d+\s*/, ""));
+  } finally {
+    backupBusy.value = "";
+  }
+}
+
+async function snapshotNow() {
+  backupBusy.value = "snapshot";
+  try {
+    const r = await api.backupSnapshot();
+    toast(`已在服务器覆盖保存 ${r.name}（${r.human}）`);
+    await loadBackupStats();
+  } catch (e) {
+    toast(String(e.message || e).replace(/^\d+\s*/, ""));
+  } finally {
+    backupBusy.value = "";
+  }
+}
+
+async function downloadSnapshot(name) {
+  backupBusy.value = name;
+  try {
+    await api.downloadBackupSnapshot(name);
+  } catch (e) {
+    toast(String(e.message || e).replace(/^\d+\s*/, ""));
+  } finally {
+    backupBusy.value = "";
+  }
+}
+
+function onRestoreFile(ev) {
+  restoreFile.value = ev.target.files?.[0] || null;
+}
+
+async function restoreBackup() {
+  if (!restoreFile.value) {
+    toast("请先选择备份文件（.tar.gz）");
+    return;
+  }
+  if (!confirm("将覆盖当前数据库并重启服务。进行中的任务会中断。确定恢复？")) return;
+  backupBusy.value = "restore";
+  try {
+    const r = await api.restoreBackup(restoreFile.value, restoreIncludeWork.value);
+    toast(r.message || "已恢复");
+    if (r.restarted) pollBackupRestart();
+  } catch (e) {
+    toast(String(e.message || e).replace(/^\d+\s*/, ""));
+  } finally {
+    backupBusy.value = "";
+  }
+}
 
 async function loadWorkdirStats() {
   workdirLoading.value = true;
@@ -810,6 +905,10 @@ async function runCleanup() {
             <dd>{{ form.concurrency }}</dd>
           </div>
           <div>
+            <dt>默认深挖次数</dt>
+            <dd>{{ form.deepen_cap }}</dd>
+          </div>
+          <div>
             <dt>低分跳过阈值</dt>
             <dd>{{ form.skip_score_threshold }}</dd>
           </div>
@@ -845,6 +944,7 @@ async function runCleanup() {
           <div v-if="llmMode === 'single'" class="settings-grid llm-config-pane">
             <label class="full">base_url
               <input v-model="form.base_url" required placeholder="https://api.deepseek.com/v1" @input="invalidateSingleKey" />
+              <small class="muted">Coding Plan 填官方根地址即可（智谱 <code>…/api/coding/paas/v4</code>、方舟 <code>…/api/coding/v3</code>），不要再加 /v1。无版本号的根会自动补 /v1。</small>
             </label>
             <label class="full">api_key
               <input v-model="form.api_key" type="password"
@@ -941,6 +1041,7 @@ async function runCleanup() {
                 </label>
                 <label class="wide">base_url
                   <input v-model="selectedLlm.base_url" placeholder="https://api.deepseek.com/v1" @input="invalidateProviderKey(selectedLlm)" />
+                  <small class="muted">Coding Plan 填官方根地址，不要再加 /v1。</small>
                 </label>
                 <label>api_key
                   <input
@@ -976,12 +1077,20 @@ async function runCleanup() {
           </div>
 
           <div v-if="llmTest" class="settings-test-result" :class="{ ok: llmTest.ok }">
-            <b>{{ llmTest.ok ? "LLM 可用" : "LLM 不可用" }}</b>
+            <div class="settings-test-head">
+              <b>{{ llmTest.ok ? "LLM 可用" : "LLM 不可用" }}</b>
+              <button type="button" class="mini-action" @click="copyLlmTest()">复制错误信息</button>
+            </div>
             <p v-if="llmTest.error">{{ llmTest.error }}</p>
+            <pre v-if="!llmTest.ok && (llmTest.error_copy || llmTest.error)" class="settings-test-raw">{{ llmTest.error_copy || llmTest.error }}</pre>
             <ul v-if="llmTest.results?.length">
               <li v-for="item in llmTest.results" :key="`${item.name}-${item.base_url}`" :class="{ ok: item.ok }">
-                <strong>{{ item.ok ? "通过" : "失败" }} · {{ item.name || "single" }}</strong>
+                <div class="settings-test-item-head">
+                  <strong>{{ item.ok ? "通过" : "失败" }} · {{ item.name || "single" }}</strong>
+                  <button type="button" class="mini-action" @click="copyLlmTest(item)">复制</button>
+                </div>
                 <small>{{ resultText(item) }}</small>
+                <pre v-if="!item.ok && (item.error_copy || item.error)" class="settings-test-raw">{{ item.error_copy || item.error }}</pre>
               </li>
             </ul>
           </div>
@@ -1010,7 +1119,7 @@ async function runCleanup() {
                 <option value="intent">自然语言意图</option>
               </select>
             </label>
-            <p class="field-hint full">分页与搜集方式对当前选用的测绘引擎生效，不限于 FOFA。</p>
+            <p class="field-hint full">分页与搜集方式对当前选用的测绘引擎生效。</p>
           </div>
 
           <div class="engine-keys">
@@ -1051,10 +1160,91 @@ async function runCleanup() {
           </legend>
           <div class="settings-grid">
             <label>新建任务默认并发 <input v-model="form.concurrency" type="number" min="1" max="32" /></label>
+            <label>新建任务默认深挖次数 <input v-model="form.deepen_cap" type="number" min="0" max="10" /></label>
+            <p class="field-hint full">同一目标被打回深挖的最大次数（人工 + AI 审核 + 自动 deepen_lead 合计）。默认 2，范围 0–10；0 表示关闭回炉。</p>
             <label>低分跳过阈值
               <input v-model="form.skip_score_threshold" type="number" step="1" />
             </label>
             <p class="field-hint full">Collector 评分低于此值的目标直接跳过，避免 worker 消耗在垃圾资产上。</p>
+          </div>
+        </fieldset>
+
+        <fieldset class="settings-block">
+          <legend>
+            <span>数据备份</span>
+            <small>导出/导入是主路径。SQLite 在线备份打一致快照，不要直接拷正在写的库文件。</small>
+          </legend>
+          <div v-if="backupRestarting" class="update-restarting">
+            <div class="update-spinner"></div>
+            <p>备份已写入，服务正在重启…</p>
+          </div>
+          <div v-else-if="backupLoading && !backupStats" class="field-hint">加载中…</div>
+          <div v-else-if="backupStats" class="workdir-panel">
+            <div class="workdir-stats-grid">
+              <div class="workdir-stat-item">
+                <span class="workdir-stat-label">数据库</span>
+                <b class="workdir-stat-value">{{ backupStats.db_human }}</b>
+              </div>
+              <div class="workdir-stat-item">
+                <span class="workdir-stat-label">库盘剩余</span>
+                <b class="workdir-stat-value small">{{ backupStats.disk?.free_human || '未知' }}</b>
+              </div>
+              <div class="workdir-stat-item">
+                <span class="workdir-stat-label">本地快照</span>
+                <b class="workdir-stat-value small">{{ backupStats.snapshots_human || '0 B' }}</b>
+              </div>
+              <div class="workdir-stat-item">
+                <span class="workdir-stat-label">自动备份</span>
+                <b class="workdir-stat-value" :class="backupStats.auto_backup?.enabled ? 'on' : 'off'">
+                  {{ backupStats.auto_backup?.enabled ? `每 ${backupStats.auto_backup.interval_hours} 小时` : '已关闭' }}
+                </b>
+              </div>
+              <div class="workdir-stat-item">
+                <span class="workdir-stat-label">工作目录</span>
+                <b class="workdir-stat-value small">{{ backupStats.work?.human || '0 B' }}</b>
+              </div>
+            </div>
+            <p class="field-hint">
+              日常请点「下载备份」把文件带走。服务器只覆盖留 1 份 gzip 快照（再打会覆盖），不自动堆多份。
+              当前库盘剩余 {{ backupStats.disk?.free_human || '未知' }}，快照占用 {{ backupStats.snapshots_human || '0 B' }}。
+              工作目录可选打包，上限 {{ backupStats.work?.max_human }}。
+            </p>
+            <div class="workdir-cleanup-controls">
+              <label class="workdir-dryrun-label">
+                <input type="checkbox" v-model="backupIncludeWork" />
+                下载时同时打包工作目录
+              </label>
+              <button type="button" :disabled="!!backupBusy" @click="exportBackup">
+                {{ backupBusy === 'export' ? '打包中…' : '下载备份' }}
+              </button>
+              <button type="button" :disabled="!!backupBusy" @click="snapshotNow">
+                {{ backupBusy === 'snapshot' ? '覆盖中…' : '在服务器覆盖留一份' }}
+              </button>
+              <button type="button" :disabled="backupLoading" @click="loadBackupStats">刷新</button>
+            </div>
+            <details v-if="backupStats.snapshots?.length" class="workdir-result-details">
+              <summary>服务器快照（{{ backupStats.snapshots.length }}）</summary>
+              <div class="workdir-result-list">
+                <div v-for="s in backupStats.snapshots" :key="s.name" class="workdir-result-item">
+                  <span class="workdir-item-name">{{ s.name }}</span>
+                  <span class="workdir-item-size">{{ s.human }}</span>
+                  <button type="button" class="mini-action" :disabled="!!backupBusy" @click="downloadSnapshot(s.name)">下载</button>
+                </div>
+              </div>
+            </details>
+            <div class="backup-restore">
+              <p class="field-hint">从备份恢复会覆盖当前数据库并重启。请先下载一份当前备份。</p>
+              <div class="workdir-cleanup-controls">
+                <input type="file" accept=".gz,.tgz,.tar.gz,application/gzip" @change="onRestoreFile" />
+                <label class="workdir-dryrun-label">
+                  <input type="checkbox" v-model="restoreIncludeWork" />
+                  同时恢复工作目录
+                </label>
+                <button type="button" class="danger" :disabled="!!backupBusy || !restoreFile" @click="restoreBackup">
+                  {{ backupBusy === 'restore' ? '恢复中…' : '恢复并重启' }}
+                </button>
+              </div>
+            </div>
           </div>
         </fieldset>
 

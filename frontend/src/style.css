@@ -347,9 +347,18 @@ nav { display: flex; gap: 2px; }
 main {
   max-width: 1360px; margin: 0 auto;
   padding: 30px 34px calc(42px + env(safe-area-inset-bottom, 0px));
+  min-height: calc(100dvh - 220px);
 }
-.view { animation: fade .2s ease; }
+/* 切页不要从 opacity:0 淡入：主线程/接口稍慢时会像白屏。位移即可。 */
+.view { animation: view-enter .16s ease; }
+@keyframes view-enter {
+  from { transform: translateY(4px); }
+  to { transform: none; }
+}
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .view { animation: none; }
+}
 .page-head { margin-bottom: 20px; }
 .page-head.split,
 .tasks-view .page-head {
@@ -1591,6 +1600,16 @@ main {
   white-space: nowrap;
 }
 
+.backup-restore {
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+.settings-block button.danger {
+  color: var(--danger, #e5484d);
+  border-color: color-mix(in oklch, var(--danger, #e5484d) 35%, var(--border));
+}
+
 /* ---------- 任务指挥台 ---------- */
 .mission-hero {
   position: relative; overflow: hidden;
@@ -1743,8 +1762,8 @@ main {
 .collab-summary .hit i { color: var(--accent-ink); }
 
 /* 三阶段横向流水线（桌面），窄屏转纵向 */
-.collab-flow { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; }
-.collab-phase { display: flex; gap: 12px; position: relative; padding-right: 14px; }
+.collab-flow { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; align-items: stretch; }
+.collab-phase { display: flex; gap: 12px; position: relative; padding-right: 14px; min-width: 0; }
 .collab-phase .phase-rail {
   display: flex; flex-direction: column; align-items: center; padding-top: 3px; flex-shrink: 0;
 }
@@ -1754,13 +1773,18 @@ main {
   flex-shrink: 0; transition: all .2s ease;
 }
 .phase-line { flex: 1; width: 2px; background: var(--border-soft); margin-top: 4px; }
-.phase-body { min-width: 0; flex: 1; padding-bottom: 6px; }
+.phase-body { min-width: 0; flex: 1; padding-bottom: 6px; display: flex; flex-direction: column; }
 .phase-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
 .phase-step {
   font-family: "IBM Plex Mono", monospace; font-size: 10px; letter-spacing: .1em;
   color: var(--faint);
 }
 .phase-head b { font-size: 13px; font-weight: 650; color: var(--ink-2); }
+.phase-n {
+  margin-left: auto;
+  font-family: "IBM Plex Mono", monospace; font-size: 11px;
+  color: var(--faint); font-variant-numeric: tabular-nums;
+}
 .phase-state-tag {
   font-size: 10px; padding: 2px 7px; border-radius: 999px;
   font-family: "IBM Plex Mono", monospace; letter-spacing: .04em;
@@ -1769,9 +1793,18 @@ main {
 .phase-state-tag.st-active { color: var(--info); border-color: color-mix(in oklch, var(--info) 40%, transparent); background: var(--info-bg); }
 .phase-state-tag.st-pending { color: var(--warn); border-color: color-mix(in oklch, var(--warn) 40%, transparent); background: var(--warn-bg); }
 .phase-state-tag.st-done { color: var(--ok); border-color: color-mix(in oklch, var(--ok) 40%, transparent); background: var(--ok-bg); }
-.phase-desc { color: var(--muted); font-size: 11.5px; line-height: 1.5; margin: 0 0 9px; }
+.phase-desc { color: var(--muted); font-size: 11.5px; line-height: 1.5; margin: 0 0 9px; flex-shrink: 0; }
 .phase-empty { color: var(--faint); font-size: 11.5px; font-style: italic; margin: 0; }
-.phase-routes { display: flex; flex-direction: column; gap: 6px; }
+.phase-routes {
+  display: flex; flex-direction: column; gap: 6px;
+  min-height: 0;
+  max-height: min(240px, 38vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklch, var(--faint) 55%, transparent) transparent;
+}
 .route-chip {
   display: flex; align-items: center; gap: 8px;
   padding: 6px 10px; border-radius: 8px;
@@ -1782,6 +1815,13 @@ main {
   width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: var(--faint);
 }
 .route-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.route-count {
+  flex-shrink: 0; font-family: "IBM Plex Mono", monospace; font-size: 11px;
+  font-variant-numeric: tabular-nums; color: var(--faint);
+  background: color-mix(in oklch, var(--surface-2) 80%, var(--bg));
+  border: 1px solid var(--border-soft);
+  padding: 1px 6px; border-radius: 999px;
+}
 .route-hit {
   flex-shrink: 0; font-family: "IBM Plex Mono", monospace; font-size: 11px;
   font-weight: 650; color: var(--accent-ink); background: var(--accent-bg);
@@ -1795,6 +1835,9 @@ main {
 @keyframes collab-pulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 0 color-mix(in oklch, var(--info) 55%, transparent); }
   50% { opacity: .7; box-shadow: 0 0 0 4px transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .route-chip.rc-running .route-status-dot { animation: none; }
 }
 /* 阶段整体状态：当前阶段高亮圆点 */
 .collab-phase.state-active .phase-dot { border-color: var(--info); background: var(--info); }
@@ -2018,6 +2061,42 @@ main {
 .ev-agent { min-width: 44px; font-weight: 600; flex: none; }
 .ev-msg { color: var(--ink-2); min-width: 0; flex: 1; word-break: break-word; }
 .ev-time { color: var(--faint); flex: none; font-size: 11px; }
+.ev-copy {
+  flex: none;
+  margin: 0;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.ev-copy:hover { color: var(--ink); border-color: var(--accent); }
+
+.settings-test-head,
+.settings-test-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.settings-test-raw {
+  margin: 0;
+  padding: 8px 9px;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  color: var(--ink-2);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  cursor: text;
+}
 
 /* 各 agent 配色（克制，区分而非炫彩） */
 .ag-orchestrator { color: var(--accent-ink); }
@@ -2280,6 +2359,9 @@ main {
   font-variant-numeric: tabular-nums;
 }
 .tag-done { font-size: 10.5px; background: var(--ok-bg); color: var(--ok); border-radius: 6px; padding: 2px 8px; margin-left: 8px; font-weight: 600; }
+.tag-fail { font-size: 10.5px; background: var(--danger-bg); color: var(--danger); border-radius: 6px; padding: 2px 8px; margin-left: 8px; font-weight: 600; }
+.tag-run { font-size: 10.5px; background: var(--info-bg); color: var(--info); border-radius: 6px; padding: 2px 8px; margin-left: 8px; font-weight: 600; }
+.tag-miss { font-size: 10.5px; background: var(--surface-2); color: var(--muted); border-radius: 6px; padding: 2px 8px; margin-left: 8px; font-weight: 600; border: 1px solid var(--border); }
 
 /* ---------- 等级标识：语义色 + 文字（不只靠色） ---------- */
 .sev-pill {
@@ -2403,6 +2485,14 @@ main {
   font-weight: 700;
 }
 .ks-invalid:hover { background: var(--danger); color: var(--on-accent); }
+.ks-retry {
+  background: var(--info-bg); color: var(--info);
+  border-color: color-mix(in oklch, var(--info) 42%, transparent);
+  font-weight: 700;
+}
+.ks-retry:hover { background: var(--info); color: var(--on-accent); }
+.killsweep-card.failed { border-color: color-mix(in oklch, var(--danger) 35%, var(--border-soft)); }
+.killsweep-card.running { border-color: color-mix(in oklch, var(--info) 35%, var(--border-soft)); }
 
 /* ---------- 抽屉：实底面板，遮罩轻暗（非毛玻璃） ---------- */
 .drawer-mask { position: fixed; inset: 0; background: oklch(0% 0 0 / 0.5); z-index: var(--z-backdrop); animation: fade .15s ease; }
@@ -2886,7 +2976,8 @@ main {
   .collab-phase:last-child { padding-bottom: 0; }
   .phase-body { padding-bottom: 8px; }
   .phase-desc { font-size: 11px; margin-bottom: 8px; }
-  .phase-routes { gap: 5px; }
+  .phase-n { margin-left: 0; }
+  .phase-routes { gap: 5px; max-height: min(200px, 32vh); }
   .route-chip { padding: 8px 10px; font-size: 12px; min-height: 38px; }
   .route-status-dot { width: 8px; height: 8px; }
 
