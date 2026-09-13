@@ -151,12 +151,15 @@ def check_http_request(
     url: str = "",
     data: str | None = None,
     json_body: Any = None,
+    files: Any = None,
     confirm_destructive: Any = False,
     confirm_reason: str = "",
 ) -> None:
     parts = [method or "", url or "", data or ""]
     if json_body is not None:
         parts.append(str(json_body))
+    if files:
+        parts.append(str(files)[:2000])
     _maybe_need_confirm(
         destructive_warning("\n".join(parts)),
         confirm_destructive,

@@ -150,7 +150,8 @@ class EscalateHunter:
             return self.executor.http_request(
                 url=url, method=args.get("method", "GET"),
                 headers=args.get("headers"), data=args.get("data"),
-                json_body=args.get("json_body"), follow_redirects=args.get("follow_redirects", False),
+                json_body=args.get("json_body"), files=args.get("files"),
+                follow_redirects=args.get("follow_redirects", False),
                 confirm_destructive=args.get("confirm_destructive", False),
                 confirm_reason=args.get("confirm_reason") or "",
             )

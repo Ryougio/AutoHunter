@@ -27,6 +27,7 @@ from app.agents import playbook_router
 from app.agents import prefilter
 from app.agents import site_collab
 from app.agents import target_cluster
+from app.agents import auth_bootstrap
 from app.agents.deepen import deepen_cap_for  # 任务级深挖上限（人工+AI+lead 合计，防死循环）
 from app.agents.prompts import is_enterprise_src, should_escalate
 from app.agents.reviewer import Reviewer
@@ -52,6 +53,25 @@ from app.schemas import Finding as FindingSchema
 from app.schemas import Verdict
 
 logger = logging.getLogger("autohunter.orchestrator")
+
+
+def _backfill_target_auth(tgt: Target, task_obj: Task | None, fallback_url: str) -> None:
+    """单站派生 Target 可能没拷 auth_context；启动时从任务凭据区回填。"""
+    if tgt.auth_context or not task_obj:
+        return
+    bindings = getattr(task_obj, "auth_bindings", None)
+    if not bindings:
+        return
+    try:
+        from app.agents.manual_targets import parse_manual_targets
+        manual = [item["url"] for item in parse_manual_targets(task_obj.manual_targets or [])]
+        ctx = auth_bootstrap.resolve_auth_context_for_target(
+            bindings, tgt.url or fallback_url, manual,
+        )
+        if ctx:
+            tgt.auth_context = ctx
+    except Exception:
+        logger.debug("auth backfill skipped url=%s", fallback_url, exc_info=True)
 
 
 def _now_iso() -> str:
@@ -1663,6 +1683,8 @@ class TaskRunner:
                         status="queued",
                         priority_score=float(spec.get("priority") or site_collab.FOCUSED_ROUTE.priority),
                         priority_reason=reason,
+                        leaked_creds=tgt.leaked_creds,
+                        auth_context=tgt.auth_context,
                     ))
             except IntegrityError:
                 # 并发：两条 discovery worker 同时派生撞了同一 site_f 编号，跳过，
@@ -1709,6 +1731,8 @@ class TaskRunner:
                         status="queued",
                         priority_score=troute.priority,
                         priority_reason=site_collab.route_reason(troute),
+                        leaked_creds=tgt.leaked_creds,
+                        auth_context=tgt.auth_context,
                     ))
             except IntegrityError:
                 # 并发：另一条 discovery worker 已派过同款主题路线，跳过。
@@ -1895,6 +1919,7 @@ class TaskRunner:
                 self._live[target_id]["score"] = tgt.priority_score
                 self._live[target_id]["score_reason"] = tgt.priority_reason
                 deepen_context = tgt.deepen_context or None
+                _backfill_target_auth(tgt, task_obj, url)
                 # 资产情报：候选归属学校/org/title，供 worker 核实并写进报告 owner
                 target_meta = {
                     "school": tgt.school or "", "org": tgt.org or "",
@@ -1982,7 +2007,8 @@ class TaskRunner:
                             engine=engine_name,
                             prompt_version=prompt_version,
                             src_rules=src_rules,
-                            pop_directive=lambda: self._pop_directive(target_id))
+                            pop_directive=lambda: self._pop_directive(target_id),
+                            task_id=task_id)
             worker_holder["worker"] = worker
             try:
                 return worker.run().model_dump(mode="json")

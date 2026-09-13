@@ -20,6 +20,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from app.http_defaults import BROWSER_HEADERS
+
 # ---------------------------------------------------------------------------
 # 黑洞 DNS 防护：autodiscover 等记录常解析出几十个 IP（大量 IPv6 黑洞地址），
 # socket.create_connection 会逐个地址试到超时，单次探活可卡几分钟，进而把
@@ -65,7 +67,7 @@ _CDN_MARKERS = (
 )
 
 # 纯静态托管 Server 头特征
-_STATIC_SERVERS = ("githubpages", "netlify", "vercel", "cloudflare", "amazons3", "aliyunoss")
+_STATIC_SERVERS = ("githubpages", "netlify", "vercel", "amazons3", "aliyunoss")
 
 # 敏感公共后缀第二级标签（*.gov / *.gov.cn / *.mil.cn …）
 _SENSITIVE_PUBLIC_LABELS = frozenset({"gov", "mil"})
@@ -172,7 +174,7 @@ def probe(url: str, timeout: float = 8.0) -> dict:
     try:
         with capped_resolution():
             with httpx.Client(timeout=timeout, verify=False, follow_redirects=True) as c:
-                r = c.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; AutoHunter)"})
+                r = c.get(url, headers=BROWSER_HEADERS)
                 body = r.text or ""
                 server = r.headers.get("server", "").lower()
                 # 粗判 SPA/纯前端：body 很短 + 含 <div id=app/root> + 几乎无表单/接口痕迹

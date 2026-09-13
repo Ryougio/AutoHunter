@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         nmap \
         python3-pip \
         jq dnsutils iputils-ping netcat-openbsd \
-        whatweb \
+        whatweb nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # sqlmap：官方 PyPI 月度版。构建不依赖 git clone GitHub（国内常超时/失败），
@@ -58,6 +58,18 @@ RUN set -eux; \
     unzip -o nuclei.zip nuclei -d /usr/local/bin/; \
     unzip -o httpx.zip httpx -d /usr/local/bin/; \
     chmod +x /usr/local/bin/nuclei /usr/local/bin/httpx; \
+    mv /usr/local/bin/httpx /usr/local/bin/httpx.bin; \
+    printf '%s\n' \
+      '#!/bin/sh' \
+      'UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"' \
+      'for a in "$@"; do' \
+      '  case "$a" in' \
+      '    *User-Agent*|*user-agent*) exec /usr/local/bin/httpx.bin "$@" ;;' \
+      '  esac' \
+      'done' \
+      'exec /usr/local/bin/httpx.bin -H "User-Agent: $UA" "$@"' \
+      > /usr/local/bin/httpx; \
+    chmod +x /usr/local/bin/httpx; \
     rm -f /tmp/*.zip; \
     apt-get purge -y unzip; rm -rf /var/lib/apt/lists/*
 
