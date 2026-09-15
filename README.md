@@ -13,7 +13,7 @@
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Vue](https://img.shields.io/badge/Vue-3-4FC08D?style=flat-square&logo=vue.js&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Compose%20v2-2496ED?style=flat-square&logo=docker&logoColor=white)
-![License](https://img.shields.io/badge/License-CC%20BY--NC%204.0-blue?style=flat-square)
+![License](https://img.shields.io/badge/License-Apache%202.0-blue?style=flat-square)
 
 **一台机器 = 24×7 不停歇的挖洞平台。你只当「人工复审员」，醒来几分钟完成裁决。**
 
@@ -152,11 +152,11 @@ Powered By **StanleyNull** · 作者 EduSRC 主页：<https://src.sjtu.edu.cn/pr
 </div>
 
 > [!WARNING]
-> **仅限对已获明确书面授权的目标使用。** 本工具遵循 CC BY-NC 4.0，禁止任何商业用途，滥用后果自负。
+> **仅限对已获明确书面授权的目标使用。** 本工具采用 Apache License 2.0，滥用后果自负。
 还有，本工具做了删除限制，但是仍有可能在某些外部情况如模型自主意愿等情况下修改或删除少量数据，本工具造成的一切后果请后果自负，请在完全了解的情况下使用!使用本工具出现的问题可以提出意见我来修改，但请不要怪到我本人或者我们团队🤔
 
 > [!NOTE]
-> 🌱 本项目为 **Demo 级别**，作者抛砖引玉，欢迎 Star / Issue / 二次开发。
+> 🌱 抛砖引玉，欢迎 Star / Issue / 二次开发。
 
 ---
 
@@ -207,7 +207,7 @@ flowchart LR
 | 🌙 **24×7 无人值守** | 挂机过夜，重启自动续跑；你醒来只做复审决策 |
 | 🔧 **真实工具链挖洞** | 容器内置 nmap · nuclei · sqlmap · httpx · whatweb，LLM 真实发包/执行，不是纸上谈兵 |
 | 🧪 **极理性 AI 初审** | 只认「实际可利用 + 实锤危害」，过滤半成品，减少无效人工复审 |
-| 🏫 **归属离线反查** | 按 IP/域名离线查所属高校，自动填报告归属单位 + EduSRC 提交 JSON |
+| 🏫 **归属证明** | 按 IP/域名查 [ip138](https://www.ip138.com/)（标记/运营商/ASN 归属地），自动填报告归属单位与证明 + EduSRC 提交 JSON |
 | 💥 **通杀 Hunter** | 出洞后自动分析能否「一打一片」，实打多个同款站点验证 |
 | 🧠 **情报沉淀复用** | 验证过的凭证/端点/指纹入全局情报库，后续 Worker 直接复用 |
 | 🛡️ **内置 WAF + 鉴权** | 应用层 WAF 默认开启，多角色访问令牌（全权/只读/观摩） |
@@ -463,18 +463,18 @@ hunt.example.com {
 
 - 🐛 发现 bug / 有建议 → 提 [Issue](https://github.com/StanleyNull/AutoHunter/issues)
 - ⭐ 觉得有用 → 点个 Star 支持一下
-- 🔀 欢迎 Fork 二次开发（保留署名、非商业用途）
+- 🔀 欢迎 Fork 二次开发（保留版权与许可声明）
 - 🙋 想出现在首页 Contributors → 按 [CONTRIBUTORS.md](CONTRIBUTORS.md) 自行申请（开 PR 即可）
 
 ---
 
 ## 许可协议
 
-本项目采用 **[CC BY-NC 4.0](./LICENSE)**（署名-非商业性使用）：
+本项目采用 **[Apache License 2.0](./LICENSE)**：
 
-- ✅ 可自由使用、修改、二次分发
-- ✅ **必须保留原作者署名**：`Powered By StanleyNull`
-- ❌ **禁止任何商业用途**
+- ✅ 可自由使用、修改、二次分发（含商业用途）
+- ✅ 必须保留版权声明与本许可副本
+- ⚠️ 仅限对已获明确书面授权的目标做安全测试
 
 ---
 

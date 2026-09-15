@@ -714,6 +714,7 @@ async function loadBoard() {
       if (b.fofa_config) task.value.fofa_config = b.fofa_config;
       if (b.model_config_data) task.value.model_config_data = b.model_config_data;
       if (b.llm_usage) task.value.llm_usage = b.llm_usage;
+      if (b.engine_usage) task.value.engine_usage = b.engine_usage;
     }
     if (!events.value.length && b.events?.length) {
       const existingByKey = new Map(events.value.map((e) => [streamEventStableKey(e), e]));
@@ -1173,6 +1174,8 @@ const rejectedCount = computed(() =>
 const archivedCount = computed(() =>
   Math.max(stats.value.archived ?? 0, loadedTabs.value.has("archived") ? archivedItems.value.length : 0));
 const archivedWriteCount = computed(() => Number(stats.value.archived_write || 0));
+const checkedHosts = computed(() => Number(stats.value.hosts_checked || 0));
+const totalHosts = computed(() => Number(stats.value.hosts_total || 0));
 const totalTargets = computed(() =>
   (stats.value.queued ?? 0) + (stats.value.scanning ?? 0) +
   (stats.value.done ?? 0) + (stats.value.dead ?? 0) + (stats.value.skipped ?? 0)
@@ -1258,6 +1261,15 @@ function workerModelTitle(worker) {
   return [worker?.model_role || "挖掘模型", worker?.model, worker?.model_base_url].filter(Boolean).join(" · ");
 }
 const tokenUsage = computed(() => task.value?.llm_usage || {});
+const engineUsage = computed(() => task.value?.engine_usage || {});
+const ENGINE_SRC_LABEL = { collector: "搜集", worker: "Worker", killsweep: "通杀" };
+const engineSourceHint = computed(() => {
+  const by = engineUsage.value.by_source || {};
+  return Object.entries(by)
+    .filter(([, n]) => Number(n) > 0)
+    .map(([k, n]) => `${ENGINE_SRC_LABEL[k] || k} ${n}`)
+    .join(" · ");
+});
 const cacheHitRate = computed(() => {
   const u = tokenUsage.value || {};
   const hit = Number(u.cache_hit_tokens || 0);
@@ -1292,11 +1304,11 @@ const missionEyebrow = computed(() => {
   if (task.value?.target_source === "site") return "COOPERATIVE SINGLE-SITE OPERATION";
   return isEnterpriseTask.value ? "AUTONOMOUS ENTERPRISE SRC OPERATION" : "AUTONOMOUS EDU SRC OPERATION";
 });
-const searchPlaceholder = computed(() =>
-  isEnterpriseTask.value
+const searchPlaceholder = computed(() => {
+  return isEnterpriseTask.value
     ? "搜索漏洞：标题 / URL / 类型 / 单位 / 系统 / 报告正文 / 审核备注"
-    : "搜索漏洞：标题 / URL / 类型 / 学校 / 报告正文 / 审核备注"
-);
+    : "搜索漏洞：标题 / URL / 类型 / 学校 / 报告正文 / 审核备注";
+});
 const scopeCountLabel = computed(() => isEnterpriseTask.value ? "范围" : "教育");
 
 const searchTokens = computed(() =>
@@ -1422,6 +1434,12 @@ function parseEventTs(ts) {
             <i>请求</i>
             <b>{{ tokenUsage.requests || 0 }}</b>
           </span>
+          <span class="runtime-chip" :title="engineUsage.last_query || ''">
+            <i>测绘</i>
+            <b>{{ engineUsage.count || 0 }}</b>
+            <small>{{ engineUsage.last_engine || engineName }}</small>
+            <small v-if="engineSourceHint">{{ engineSourceHint }}</small>
+          </span>
         </div>
       </div>
       <div class="mission-side">
@@ -1509,13 +1527,13 @@ function parseEventTs(ts) {
 
     <div class="metric-grid">
       <div class="metric-card">
-        <span class="metric-k">TARGETS</span><b>{{ totalTargets }}</b><em>目标总数</em>
+        <span class="metric-k">SITES</span><b>{{ totalHosts || totalTargets }}</b><em>独立网站 · {{ totalTargets }} 条目标</em>
       </div>
       <div class="metric-card active">
         <span class="metric-k">ACTIVE</span><b>{{ stats.scanning ?? 0 }}</b><em>扫描中</em>
       </div>
       <div class="metric-card">
-        <span class="metric-k">DONE</span><b>{{ stats.done ?? 0 }}</b><em>已扫</em>
+        <span class="metric-k">CHECKED</span><b>{{ checkedHosts }}</b><em>已检查</em>
       </div>
       <div class="metric-card hot">
         <span class="metric-k">FINDINGS</span><b>{{ stats.findings_total ?? 0 }}</b><em>原始发现</em>
