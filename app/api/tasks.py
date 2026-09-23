@@ -300,6 +300,7 @@ def _task_to_dto(t: Task, stats: TaskStats | None = None,
         vuln_types=t.vuln_types or [], target_source=t.target_source,
         engine=t.engine or "", fofa_query="" if observer else t.fofa_query, concurrency=t.concurrency,
         deepen_cap=clamp_deepen_cap(getattr(t, "deepen_cap", None)),
+        auto_killsweep=getattr(t, "auto_killsweep", True) is not False,
         src_rules="" if observer else (t.src_rules or ""),
         manual_targets=[] if observer else (t.manual_targets or []),
         auth_bindings=_public_auth_bindings(t, observer=observer),
@@ -482,6 +483,7 @@ async def create_task(req: CreateTaskRequest, session: AsyncSession = Depends(ge
         model_config_json=model_config,
         fofa_config=fofa_cfg, concurrency=_clamp_task_concurrency(req.concurrency),
         deepen_cap=clamp_deepen_cap(req.deepen_cap),
+        auto_killsweep=req.auto_killsweep is not False,
         status="created",
     )
     session.add(task)
@@ -747,6 +749,8 @@ async def update_task(task_id: str, req: UpdateTaskRequest, session: AsyncSessio
         task.concurrency = _clamp_task_concurrency(req.concurrency)
     if req.deepen_cap is not None:
         task.deepen_cap = clamp_deepen_cap(req.deepen_cap)
+    if req.auto_killsweep is not None:
+        task.auto_killsweep = bool(req.auto_killsweep)
 
     old_query = task.fofa_query or ""
     if req.fofa_query is not None:
@@ -1133,8 +1137,12 @@ async def list_hosts(
     if not task:
         raise HTTPException(404, "任务不存在")
     rows = (await session.execute(
-        select(Target).where(Target.task_id == task_id)
-    )).scalars().all()
+        select(
+            Target.host, Target.url, Target.title, Target.school, Target.org,
+            Target.status, Target.verdict, Target.deepen_count,
+            Target.updated_at, Target.created_at, Target.priority_score,
+        ).where(Target.task_id == task_id)
+    )).all()
     grouped: dict[str, list] = {}
     for t in rows:
         key = (t.host or "").strip() or (t.url or "").strip()

@@ -107,7 +107,7 @@ async function decide(status) {
       user_status: status, user_severity: userSeverity.value, user_notes: userNotes.value,
     });
     emit("toast", status === "passed"
-      ? `已通过 → 进入待提交${res.killsweep_triggered ? "，通杀 Hunter 已启动" : ""}${res.killsweep_skipped_reason ? "，已断开通杀递归" : ""}`
+      ? `已通过 → 进入待提交${res.killsweep_triggered ? "，通杀 Hunter 已启动" : ""}${res.killsweep_skipped_reason ? `，${res.killsweep_skipped_reason}` : ""}`
       : "已驳回");
     emit("updated");
     emit("close");

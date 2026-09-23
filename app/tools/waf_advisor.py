@@ -82,6 +82,38 @@ _SIGNATURES: tuple[WafSignature, ...] = (
 
 
 _BLOCK_STATUSES = {400, 403, 406, 429, 501, 503}
+# 自动换出口只认这些状态。400 经常是业务参数错误，不拿来轮换 IP。
+_PROXY_ROTATE_STATUSES = {403, 406, 429, 501, 503}
+_NAMED_WAF = {"cloudflare", "modsecurity", "imperva", "f5_bigip", "safedog", "d_shield"}
+# 只看响应正文里的强标记。不要用 _detect_waf 自产的「疑似拦截」文案，
+# 也不要把普通 Forbidden / Server: nginx 当成封 IP。
+_GENERIC_BODY_MARKERS = ("blocked", "firewall", "security violation", "拦截", "阻断")
+
+
+def is_waf_blocked(
+    status_code: int | None,
+    response_headers: dict[str, Any] | None = None,
+    response_body: str = "",
+) -> bool:
+    """有明确 WAF/封禁证据才返回 True。仅凭 403 或英文 Forbidden 不够。"""
+    status = int(status_code or 0)
+    if status not in _PROXY_ROTATE_STATUSES:
+        return False
+    headers = _normalize_headers(response_headers or {})
+    body = response_body or ""
+    signature, evidence = _detect_waf(status, headers, body)
+    if signature.name in _NAMED_WAF:
+        return True
+    body_l = body.lower()
+    if signature.name == "aws_waf":
+        return "request blocked" in body_l
+    if signature.name == "nginx_openresty":
+        return "openresty" in body_l or "406 not acceptable" in body_l
+    if signature.name != "generic":
+        return False
+    if "疑似" in (evidence or ""):
+        return False
+    return any(marker in body_l for marker in _GENERIC_BODY_MARKERS)
 
 
 def suggest_waf_bypass(

@@ -1327,6 +1327,11 @@ async def user_review(finding_id: str, req: UserReviewRequest,
         if trigger_killsweep and tgt and tgt.source == "killsweep":
             trigger_killsweep = False
             killsweep_skipped_reason = "该漏洞来自通杀验证目标，已断开通杀递归触发"
+        elif trigger_killsweep:
+            task_row = await session.get(Task, task_id) if task_id else None
+            if task_row is not None and getattr(task_row, "auto_killsweep", True) is False:
+                trigger_killsweep = False
+                killsweep_skipped_reason = "本任务已关闭自动通杀"
     if req.user_severity is not None:
         r.user_severity = req.user_severity
     if req.user_notes is not None:

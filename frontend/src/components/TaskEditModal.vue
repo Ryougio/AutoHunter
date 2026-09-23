@@ -67,6 +67,7 @@ const form = reactive({
   page_size: 100,
   concurrency: 3,
   deepen_cap: 2,
+  auto_killsweep: true,
   skip_site_recon: false,
 });
 const { authBindings, addBinding, removeBinding, exportAuthBindings, bindingOptions } =
@@ -150,6 +151,7 @@ function fill(task) {
   form.skip_site_recon = !!fofaCfg.skip_site_recon;
   form.concurrency = task.concurrency || 3;
   form.deepen_cap = task.deepen_cap ?? 2;
+  form.auto_killsweep = task.auto_killsweep !== false;
   loadAuthBindings(task);
 
   const providers = Array.isArray(modelCfg.providers) ? modelCfg.providers : [];
@@ -272,6 +274,7 @@ async function save() {
     src_rules: form.src_rules,
     concurrency: parseInt(form.concurrency) || 3,
     deepen_cap: Math.max(0, Math.min(parseInt(form.deepen_cap) || 0, 10)),
+    auto_killsweep: form.auto_killsweep !== false,
     model_config_data: modelConfig,
     fofa_config: fofaConfig,
   });
@@ -297,6 +300,10 @@ async function save() {
         <label>任务名称 <input v-model="form.name" required /></label>
         <label>worker 并发 <input v-model="form.concurrency" type="number" min="1" max="32" /></label>
         <label>深挖次数 <input v-model="form.deepen_cap" type="number" min="0" max="10" /></label>
+        <label class="check-line">
+          <input type="checkbox" v-model="form.auto_killsweep" />
+          复审通过后自动通杀
+        </label>
         <label>任务模式
           <select v-model="form.src_type">
             <option value="edusrc">EduSRC（教育行业）</option>

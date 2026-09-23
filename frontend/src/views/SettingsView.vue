@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { api } from "../api.js";
 import LlmModelPicker from "../components/LlmModelPicker.vue";
+import ProxyPoolEditor from "../components/ProxyPoolEditor.vue";
 import { copyText, formatLlmTestCopy } from "../clipboard.js";
 import {
   ACCENT_PRESETS,
@@ -33,7 +34,6 @@ const workdirCleaning = ref(false);
 const workdirStats = ref(null);
 const workdirResult = ref(null);
 const cleanupRetentionDays = ref(7);
-const cleanupDryRun = ref(true);
 const backupLoading = ref(false);
 const backupBusy = ref("");
 const backupStats = ref(null);
@@ -836,6 +836,7 @@ const SETTINGS_TABS = [
   { id: "llm", label: "模型", hint: "LLM 通道" },
   { id: "recon", label: "测绘", hint: "引擎与 Key" },
   { id: "runtime", label: "调度", hint: "并发深挖" },
+  { id: "proxy", label: "代理", hint: "WAF 封禁换 IP" },
   { id: "data", label: "数据", hint: "备份磁盘" },
   { id: "update", label: "更新", hint: "版本检查" },
 ];
@@ -955,16 +956,19 @@ async function loadWorkdirStats() {
 }
 
 async function runCleanup() {
+  const days = Number(cleanupRetentionDays.value);
+  if (!Number.isFinite(days) || days <= 0) {
+    toast("保留天数要大于 0，才会删除过期目录");
+    return;
+  }
+  if (!confirm(`将删除超过 ${days} 天没再写入的工作目录。正在挖掘的目标不会动。确定清理？`)) return;
   workdirCleaning.value = true;
   workdirResult.value = null;
   try {
-    const res = await api.workdirCleanup(cleanupRetentionDays.value, cleanupDryRun.value);
+    const res = await api.workdirCleanup(days);
     workdirResult.value = res;
-    const prefix = res.dry_run ? "模拟清理" : "清理";
-    toast(`${prefix}完成：删除 ${res.deleted_dirs} 个目录，释放 ${res.freed_human}`);
-    if (!res.dry_run) {
-      await loadWorkdirStats();
-    }
+    toast(`已清理 ${res.deleted_dirs} 个目录，释放 ${res.freed_human}`);
+    await loadWorkdirStats();
   } catch (e) {
     toast(String(e.message || e).replace(/^\d+\s*/, ""));
   } finally {
@@ -1365,6 +1369,14 @@ async function runCleanup() {
           </div>
         </fieldset>
 
+        <fieldset v-show="settingsTab === 'proxy'" class="settings-block">
+          <legend>
+            <span>代理池</span>
+            <small>挖洞流量出口。关闭或没有可用代理时继续直连，不影响现有任务。</small>
+          </legend>
+          <ProxyPoolEditor />
+        </fieldset>
+
         <fieldset v-show="settingsTab === 'data'" class="settings-block">
           <legend>
             <span>数据备份</span>
@@ -1481,12 +1493,8 @@ async function runCleanup() {
                 清理保留天数
                 <input v-model.number="cleanupRetentionDays" type="number" min="0" max="365" />
               </label>
-              <label class="workdir-dryrun-label">
-                <input type="checkbox" v-model="cleanupDryRun" />
-                模拟运行（不实际删除）
-              </label>
               <button type="button" :disabled="workdirCleaning" @click="runCleanup">
-                {{ workdirCleaning ? "清理中…" : (cleanupDryRun ? "模拟清理" : "执行清理") }}
+                {{ workdirCleaning ? "清理中…" : "清理过期目录" }}
               </button>
               <button type="button" @click="loadWorkdirStats" :disabled="workdirLoading">
                 刷新统计
@@ -1495,7 +1503,7 @@ async function runCleanup() {
 
             <div v-if="workdirResult" class="workdir-result">
               <div class="workdir-result-summary">
-                <span>{{ workdirResult.dry_run ? "模拟清理" : "清理" }}完成</span>
+                <span>清理完成</span>
                 <span>扫描 {{ workdirResult.scanned_dirs }} 个目录</span>
                 <span>删除 {{ workdirResult.deleted_dirs }} 个</span>
                 <span v-if="workdirResult.failed_dirs">失败 {{ workdirResult.failed_dirs }} 个</span>

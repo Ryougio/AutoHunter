@@ -19,7 +19,8 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
-from fastapi.staticfiles import StaticFiles
+
+from app.web_cache import HTML_CACHE, HashedAssetFiles
 
 from app.agent_runtime import (
     AGENT_THREAD_POOL_SIZE,
@@ -33,13 +34,14 @@ from app.agent_runtime import (
     REVIEW_MAX_CONCURRENCY,
     WORKER_MAX_CONCURRENCY,
 )
-from app.api import backup, findings, intel, runtime_logs, settings, stream, tasks, update, vulns
+from app.api import backup, findings, intel, proxy, runtime_logs, settings, stream, tasks, update, vulns
 from app.api import assets as assets_api
 from app.backup import run_periodic_backup
 from app.db.session import init_db
 from app.ds2api_proxy import ENABLED as DS2API_ENABLED, router as ds2api_router
 from app.orchestrator import manager
 from app.settings_service import init_settings_cache
+from app.proxy_service import init_proxy_cache
 from app.security import SECURITY_HEADERS, auth_enabled, protected_path, request_allowed, resolve_role, token_from_headers
 from app.waf import WAF_BLOCK_MODE, inspect_request, waf_headers
 from app.workdir_cleanup import run_periodic_cleanup
@@ -126,6 +128,7 @@ async def lifespan(app: FastAPI):
     backup_task = asyncio.create_task(run_periodic_backup())
     await init_db()
     await init_settings_cache()
+    await init_proxy_cache()
     DIAG_LOG.info(
         "并发档: cpus=%.1f mem_gib=%.1f worker=%s review=%s killsweep=%s escalation=%s assistant=%s agent_pool=%s collector_io=%s",
         DETECTED_CPUS,
@@ -169,6 +172,7 @@ app = FastAPI(title="AutoHunter", version="0.1", lifespan=lifespan)
 if DS2API_ENABLED:
     app.include_router(ds2api_router)
 app.include_router(settings.router)
+app.include_router(proxy.router)
 app.include_router(backup.router)
 
 
@@ -263,13 +267,13 @@ async def favicon_ico():
     return Response(content=FAVICON_SVG, media_type="image/svg+xml")
 
 
-# Vite 资源目录（/assets/*.js|css）
+# Vite 资源目录（/assets/*.js|css）。文件名带内容哈希，可长期缓存。
 if (WEB_DIR / "assets").exists():
-    app.mount("/assets", StaticFiles(directory=str(WEB_DIR / "assets")), name="assets")
+    app.mount("/assets", HashedAssetFiles(directory=str(WEB_DIR / "assets")), name="assets")
 
 
 @app.get("/")
 async def index():
     if INDEX_FILE.exists():
-        return FileResponse(str(INDEX_FILE))
+        return FileResponse(str(INDEX_FILE), headers={"Cache-Control": HTML_CACHE})
     return {"msg": "前端未构建，请运行 vite build 或使用 Docker 镜像"}

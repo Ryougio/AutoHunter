@@ -60,6 +60,7 @@ class Task(Base):
     engine: Mapped[str] = mapped_column(String(20), default="")         # 搜索引擎：fofa/quake/hunter/zoomeye/shodan/censys
     concurrency: Mapped[int] = mapped_column(Integer, default=3)
     deepen_cap: Mapped[int] = mapped_column(Integer, default=2)         # 单目标深挖回炉上限（人工+AI+lead）
+    auto_killsweep: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)  # 复审通过后是否自动开通杀
     # created / running / paused / stopped / idle
     status: Mapped[str] = mapped_column(String(20), default="created")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
@@ -294,4 +295,5 @@ class SystemSettings(Base):
     engines: Mapped[dict] = mapped_column(JSON, default=dict)   # {engine_name: {key, base_url, ...}}
     defaults: Mapped[dict] = mapped_column(JSON, default=dict)  # concurrency/skip_score_threshold/engine
     ui: Mapped[dict] = mapped_column(JSON, default=dict)        # 外观：主题色 / 背景图元数据
+    proxy: Mapped[dict] = mapped_column(JSON, default=dict)     # 代理池：enabled/proxies[]
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)

@@ -59,6 +59,7 @@ class CreateTaskRequest(BaseModel):
     engine_config: EngineConfigDTO = Field(default_factory=EngineConfigDTO)  # 引擎 Key/URL
     concurrency: int = 3
     deepen_cap: int = 2
+    auto_killsweep: bool = True
 
 
 class PartialModelConfigDTO(BaseModel):
@@ -107,6 +108,7 @@ class UpdateTaskRequest(BaseModel):
     engine_config: Optional[PartialEngineConfigDTO] = None
     concurrency: Optional[int] = None
     deepen_cap: Optional[int] = None
+    auto_killsweep: Optional[bool] = None
 
 
 class DirectiveRequest(BaseModel):
@@ -147,6 +149,7 @@ class TaskResponse(BaseModel):
     fofa_query: str
     concurrency: int
     deepen_cap: int = 2
+    auto_killsweep: bool = True
     src_rules: str = ""
     manual_targets: list[str] = Field(default_factory=list)
     auth_bindings: list[dict] = Field(default_factory=list)

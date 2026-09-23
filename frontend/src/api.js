@@ -210,6 +210,20 @@ function qs(params = {}) {
   return out ? `?${out}` : "";
 }
 
+async function proxyImport(text, file) {
+  const headers = {};
+  const token = apiToken();
+  if (token) headers["X-Autohunter-Token"] = token;
+  const body = new FormData();
+  if (text) body.append("text", text);
+  if (file) body.append("file", file, file.name || "proxies.txt");
+  const res = await fetch(base + "/api/proxy/import", { method: "POST", headers, body });
+  const resText = await res.text();
+  if (res.status === 403) throw new Error("只读令牌不允许此操作");
+  if (!res.ok) throw new Error(`${res.status} ${resText}`);
+  try { return JSON.parse(resText); } catch { throw new Error(resText || "导入失败"); }
+}
+
 async function downloadFile(method, url) {
   const headers = {};
   const token = apiToken();
@@ -281,7 +295,9 @@ export const api = {
   // 任务置顶：单条 / 批量，仅 full 令牌可写（后端中间件拦 observer/readonly）。
   taskTop: (id, isTop) => req("PATCH", `/api/tasks/${id}/top`, { is_top: !!isTop }),
   taskBatchTop: (ids, isTop) => req("PATCH", "/api/tasks/batch/top", { ids, is_top: !!isTop }),
-  reviewQueue: (id, q) => req("GET", `/api/tasks/${id}/review-queue${qs({ q })}`),
+  // 第三参 opts 可选（compact/limit/offset）；缺省与旧调用完全一致：裸 list、全字段。
+  reviewQueue: (id, q, opts = {}) =>
+    req("GET", `/api/tasks/${id}/review-queue${qs({ q, ...opts })}`),
   submitList: (id, submitted, q, opts = {}) =>
     req("GET", `/api/tasks/${id}/submit-list${qs({ submitted, q, ...opts })}`),
   rejectedList: (id, q) => req("GET", `/api/tasks/${id}/rejected${qs({ q })}`),
@@ -318,8 +334,8 @@ export const api = {
   testLLM: (data) => req("POST", "/api/settings/test-llm", data),
   // 工作目录管理
   workdirStats: () => req("GET", "/api/settings/workdir/stats"),
-  workdirCleanup: (retentionDays, dryRun = true) =>
-    req("POST", `/api/settings/workdir/cleanup${qs({ retention_days: retentionDays, dry_run: dryRun })}`),
+  workdirCleanup: (retentionDays) =>
+    req("POST", `/api/settings/workdir/cleanup${qs({ retention_days: retentionDays, dry_run: false })}`),
   backupStatus: () => req("GET", "/api/backup/status"),
   backupSnapshot: () => req("POST", "/api/backup/snapshot"),
   downloadBackupExport: (includeWork = false) =>
@@ -350,6 +366,13 @@ export const api = {
   runtimeLogStats: () => req("GET", "/api/runtime-logs/stats"),
   runtimeLogs: (level, agent, q, opts = {}) =>
     req("GET", `/api/runtime-logs${qs({ level, agent, q, ...opts })}`),
+  proxyList: () => req("GET", "/api/proxy"),
+  proxyAdd: (data) => req("POST", "/api/proxy", data),
+  proxyUpdate: (id, data) => req("PUT", `/api/proxy/${encodeURIComponent(id)}`, data),
+  proxyDelete: (id) => req("DELETE", `/api/proxy/${encodeURIComponent(id)}`),
+  proxyImport: (text, file) => proxyImport(text, file),
+  proxyTest: (data) => req("POST", "/api/proxy/test", data),
+  proxyToggle: (enabled) => req("PUT", "/api/proxy/toggle", { enabled }),
   // 一键更新
   checkUpdate: () => req("GET", "/api/update/check"),
   runUpdate: () => req("POST", "/api/update/run"),

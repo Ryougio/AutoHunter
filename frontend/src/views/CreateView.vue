@@ -22,6 +22,7 @@ const form = reactive({
   model_mode: "inherit",
   base_url: "", api_key: "", key_ref: "", model: "", protocol: "auto", prompt_version: "legacy",
   fofa_key: "", fofa_base_url: "", max_pages: 20, concurrency: 3, deepen_cap: 2,
+  auto_killsweep: true,
   skip_site_recon: false,
   skip_recon_touched: false,   // 用户是否手动调过这个开关（调过就不再自动跟随凭据）
 });
@@ -278,6 +279,7 @@ async function submit() {
     src_rules: form.src_rules,
     concurrency: parseInt(form.concurrency) || 3,
     deepen_cap: Math.max(0, Math.min(parseInt(form.deepen_cap) || 0, 10)),
+    auto_killsweep: form.auto_killsweep !== false,
     model_config_data: modelConfig,
     fofa_config: fofaConfig,
   };
@@ -530,6 +532,11 @@ onMounted(async () => {
             <label>worker 并发 <input v-model="form.concurrency" type="number" min="1" max="32" /></label>
             <label>深挖次数 <input v-model="form.deepen_cap" type="number" min="0" max="10" /></label>
           </div>
+          <label class="check-line">
+            <input type="checkbox" v-model="form.auto_killsweep" />
+            复审通过后自动通杀
+          </label>
+          <p class="create-mini">关掉后，通过复审只进待提交，不会自动分析同款系统。通杀列里已有记录仍可手动重启。</p>
           <p v-if="!isSiteMode" class="create-mini">页数对当前测绘引擎生效。</p>
           <template v-if="!isSiteMode && engineIsFofa">
             <label>FOFA Key（本任务覆盖，可选） <input v-model="form.fofa_key" type="password" placeholder="留空用系统设置" /></label>
@@ -547,6 +554,7 @@ onMounted(async () => {
           <b>{{ form.name.trim() || "未命名任务" }}</b>
           <dl>
             <div><dt>口径</dt><dd>{{ form.src_type === "enterprise" ? "企业 SRC" : "EduSRC" }}</dd></div>
+            <div><dt>通杀</dt><dd>{{ form.auto_killsweep === false ? "手动" : "自动" }}</dd></div>
             <div><dt>来源</dt><dd>{{ recapSource }}</dd></div>
             <div v-if="!isSiteMode"><dt>引擎</dt><dd>{{ engineLabel }}</dd></div>
             <div><dt>漏洞</dt><dd>{{ vulnSelected.size }} 类</dd></div>
