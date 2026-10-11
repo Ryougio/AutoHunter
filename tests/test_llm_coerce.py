@@ -9,8 +9,11 @@ from types import SimpleNamespace
 from app.llm.client import (
     LLMClient,
     LLMError,
+    _apply_emulated_tool_calls,
     _classify_error,
     _coerce_chat_message,
+    _parse_dsml_tool_calls,
+    _parse_emulated_tool_calls,
     _strip_thinking_tags,
     llm_error_event_fields,
 )
@@ -120,6 +123,56 @@ class StripThinkingTagsTests(unittest.TestCase):
         self.assertEqual(out.content, "YES 复现成功")
         self.assertEqual(out.tool_calls[0].function.name, "submit_review")
         self.assertEqual(json.loads(out.tool_calls[0].function.arguments)["verdict"], "accepted")
+
+
+class CompatibleToolCallTests(unittest.TestCase):
+    """非官方 DeepSeek 端点：data 包装、argument 别名、DSML 标签。Issue #75。"""
+
+    def test_dict_data_wrapper(self):
+        out = _coerce_chat_message({
+            "data": {"choices": [{"message": {"role": "assistant", "content": "ok"}}]},
+        })
+        self.assertEqual(out.content, "ok")
+
+    def test_object_data_wrapper_when_choices_empty(self):
+        resp = SimpleNamespace(
+            id=None, choices=None, model=None,
+            data={"choices": [{"message": {"content": "from-data"}}]},
+        )
+        out = _coerce_chat_message(resp)
+        self.assertEqual(out.content, "from-data")
+
+    def test_argument_alias_in_fenced_json(self):
+        text = '先看一眼\n```json\n{"tool_calls":[{"name":"http_request","argument":{"url":"https://example.com"}}]}\n```'
+        content, calls = _parse_emulated_tool_calls(text)
+        self.assertEqual(calls[0].function.name, "http_request")
+        self.assertEqual(json.loads(calls[0].function.arguments)["url"], "https://example.com")
+        self.assertNotIn("tool_calls", content)
+
+    def test_dsml_invoke_and_truncated_parameter(self):
+        text = (
+            '我先对目标做基础侦察。\n'
+            '<｜｜DSML｜｜ invoke name="http_request">\n'
+            '<｜｜DSML｜｜ parameter name="url" string="true">https://example.com</｜｜DSML｜｜ parameter>\n'
+            '<｜｜DSML｜｜ /invoke>'
+        )
+        content, calls = _parse_dsml_tool_calls(text)
+        self.assertIn("基础侦察", content)
+        self.assertEqual(calls[0].function.name, "http_request")
+        self.assertEqual(json.loads(calls[0].function.arguments)["url"], "https://example.com")
+
+        truncated = (
+            '<｜｜DSML｜｜ invoke name="http_request">\n'
+            '<｜｜DSML｜｜ parameter nam'
+        )
+        _, calls = _parse_dsml_tool_calls(truncated)
+        self.assertEqual(calls[0].function.name, "http_request")
+        self.assertEqual(json.loads(calls[0].function.arguments), {})
+
+    def test_apply_leaves_plain_answer(self):
+        msg = SimpleNamespace(content="这是普通回答，没有工具。", tool_calls=None, role="assistant")
+        out = _apply_emulated_tool_calls(msg)
+        self.assertIs(out, msg)
 
 
 if __name__ == "__main__":

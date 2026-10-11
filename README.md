@@ -146,6 +146,17 @@
   </tr>
 </table>
 
+<table>
+  <tr>
+    <td align="center" width="100">
+      <a href="https://github.com/kerlingcode">
+        <img src="https://avatars.githubusercontent.com/u/21171415?v=4&s=128" width="72" height="72" alt="kerlingcode" /><br />
+        <sub><b>kerlingcode</b></sub>
+      </a><br /><sup>LLM Tool Calls</sup>
+    </td>
+  </tr>
+</table>
+
 </div>
 
 <br>

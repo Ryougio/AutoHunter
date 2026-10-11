@@ -532,6 +532,27 @@ def _first_balanced_json(s: str) -> str | None:
 _FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
 
 
+def _tool_call_ns(name: str, args: Any) -> SimpleNamespace:
+    args_str = args if isinstance(args, str) else json.dumps(args if args is not None else {}, ensure_ascii=False)
+    return SimpleNamespace(
+        id="call_" + uuid.uuid4().hex[:24],
+        type="function",
+        function=SimpleNamespace(name=str(name), arguments=args_str),
+    )
+
+
+def _pick_arguments(fn: Any, it: Any = None) -> Any:
+    """官方字段是 arguments。部分 DeepSeek 兼容端点写成 argument。"""
+    for src in (fn, it):
+        if not isinstance(src, dict):
+            continue
+        if "arguments" in src and src.get("arguments") not in (None, ""):
+            return src.get("arguments")
+        if "argument" in src and src.get("argument") not in (None, ""):
+            return src.get("argument")
+    return {}
+
+
 def _extract_emulated_calls(obj: Any) -> list[Any] | None:
     if not isinstance(obj, dict):
         return None
@@ -552,14 +573,80 @@ def _extract_emulated_calls(obj: Any) -> list[Any] | None:
         name = fn.get("name") or it.get("name")
         if not name:
             continue
-        args = fn.get("arguments", it.get("arguments", {}))
-        args_str = args if isinstance(args, str) else json.dumps(args or {}, ensure_ascii=False)
-        calls.append(SimpleNamespace(
-            id="call_" + uuid.uuid4().hex[:24],
-            type="function",
-            function=SimpleNamespace(name=str(name), arguments=args_str),
-        ))
+        calls.append(_tool_call_ns(str(name), _pick_arguments(fn, it)))
     return calls or None
+
+
+# DeepSeek 兼容端点有时不填 message.tool_calls，而把调用写成 DSML 标签。
+# 兼容层来自 kerlingcode：https://github.com/StanleyNull/AutoHunter/issues/75
+_DSML_TAG_RE = re.compile(
+    r"<\s*(/?)\s*[|｜]+\s*DSML\s*[|｜]+\s*(/?)\s*([A-Za-z_]*)([^>]*)>",
+    re.IGNORECASE,
+)
+
+
+def _dsml_attr(attrs: str, key: str) -> str:
+    blob = attrs or ""
+    matched = re.search(rf'(?i)(?:^|\s){re.escape(key)}\s*=\s*"([^"]*)"', blob)
+    if not matched:
+        matched = re.search(rf"(?i)(?:^|\s){re.escape(key)}\s*=\s*'([^']*)'", blob)
+    if not matched:
+        return ""
+    import html
+    return html.unescape(matched.group(1)).strip()
+
+
+def _parse_dsml_tool_calls(text: str) -> tuple[str, list[Any] | None]:
+    """解析 DSML invoke/parameter。标签被截断时，已读到的 invoke 仍然收下。"""
+    if not text or "DSML" not in text:
+        return text, None
+    tags = list(_DSML_TAG_RE.finditer(text))
+    if not tags:
+        return text, None
+    import html
+    calls: list[Any] = []
+    current_name: str | None = None
+    current_args: dict[str, Any] = {}
+
+    def _flush() -> None:
+        nonlocal current_name, current_args
+        if current_name:
+            calls.append(_tool_call_ns(current_name, current_args))
+        current_name = None
+        current_args = {}
+
+    for index, tag in enumerate(tags):
+        closing = bool(tag.group(1) or tag.group(2))
+        kind = (tag.group(3) or "").lower()
+        attrs = tag.group(4) or ""
+        if kind == "invoke" and not closing:
+            _flush()
+            current_name = _dsml_attr(attrs, "name")
+            current_args = {}
+            continue
+        if kind == "invoke" and closing:
+            _flush()
+            continue
+        if kind not in ("parameter", "param") or closing or not current_name:
+            continue
+        end = tags[index + 1].start() if index + 1 < len(tags) else len(text)
+        raw_val = html.unescape(text[tag.end():end]).strip()
+        stringish = _dsml_attr(attrs, "string").lower() in ("true", "1", "yes")
+        parsed: Any = raw_val
+        if not stringish and raw_val:
+            try:
+                parsed = json.loads(raw_val)
+            except Exception:
+                parsed = raw_val
+        pname = _dsml_attr(attrs, "name") or "arguments"
+        if pname in ("arguments", "argument") and isinstance(parsed, dict):
+            current_args.update(parsed)
+        elif pname:
+            current_args[pname] = parsed
+    _flush()
+    if not calls:
+        return text, None
+    return text[:tags[0].start()].strip(), calls
 
 
 def _parse_emulated_tool_calls(text: str) -> tuple[str, list[Any] | None]:
@@ -623,9 +710,11 @@ def _strip_message_thinking(msg: Any) -> Any:
 
 
 def _apply_emulated_tool_calls(msg: Any) -> Any:
-    """把模拟模式下的纯文本响应解析成带 tool_calls 的 message。"""
+    """把正文里的 DSML / JSON 工具调用收成 tool_calls。没有调用时原样返回。"""
     text = getattr(msg, "content", None) or ""
-    content, calls = _parse_emulated_tool_calls(text)
+    content, calls = _parse_dsml_tool_calls(text)
+    if not calls:
+        content, calls = _parse_emulated_tool_calls(text)
     if calls:
         return SimpleNamespace(content=content, tool_calls=calls, role="assistant")
     return msg
@@ -650,7 +739,7 @@ def _dict_to_message(msg: dict[str, Any]) -> SimpleNamespace:
             if not isinstance(c, dict):
                 continue
             fn = c.get("function") if isinstance(c.get("function"), dict) else {}
-            args = fn.get("arguments")
+            args = _pick_arguments(fn, c)
             if args is not None and not isinstance(args, str):
                 args = json.dumps(args, ensure_ascii=False)
             ns_calls.append(SimpleNamespace(
@@ -665,12 +754,22 @@ def _dict_to_message(msg: dict[str, Any]) -> SimpleNamespace:
     )
 
 
-def _coerce_chat_message(resp: Any) -> Any:
+def _looks_like_chat_payload(value: Any) -> bool:
+    if isinstance(value, (str, bytes, bytearray)):
+        return True
+    if isinstance(value, dict):
+        return any(key in value for key in ("choices", "content", "message", "tool_calls", "data"))
+    return bool(getattr(value, "choices", None) or hasattr(value, "content") or hasattr(value, "tool_calls"))
+
+
+def _coerce_chat_message(resp: Any, _depth: int = 0) -> Any:
     """兼容各类网关返回：ChatCompletion / dict / JSON 字符串 / 纯文本 / SSE 残留。
 
     部分中转会把整段 JSON 当字符串返回，或 200 直接回纯文本，官方 SDK 解出来是 str，
     随后访问 ``resp.choices`` 就会报 ``'str' object has no attribute 'choices'``。
     """
+    if _depth > 4:
+        raise LLMError("upstream", "LLM 响应格式异常。", detail="data wrapper nested too deep")
     if resp is None:
         raise LLMError("upstream", "LLM 返回空响应。", detail="resp is None")
 
@@ -703,6 +802,9 @@ def _coerce_chat_message(resp: Any) -> Any:
                 detail=_sanitize_error_detail(str(detail)),
             )
         choices = resp.get("choices")
+        nested = resp.get("data")
+        if not (isinstance(choices, list) and choices) and _looks_like_chat_payload(nested) and nested is not resp:
+            return _coerce_chat_message(nested, _depth + 1)
         if isinstance(choices, list) and choices:
             first = choices[0]
             if isinstance(first, str):
@@ -724,8 +826,12 @@ def _coerce_chat_message(resp: Any) -> Any:
             detail=_sanitize_error_detail(str(resp)[:400]),
         )
 
-    # 标准 ChatCompletion 对象
+    # 标准 ChatCompletion 对象。部分兼容端点把真响应塞在 .data，choices 为空。
     choices = getattr(resp, "choices", None)
+    if not choices:
+        nested = getattr(resp, "data", None)
+        if nested is not None and nested is not resp and _looks_like_chat_payload(nested):
+            return _coerce_chat_message(nested, _depth + 1)
     if choices:
         first = choices[0]
         msg = getattr(first, "message", None)
@@ -1343,7 +1449,10 @@ class LLMClient:
 
         def _finish(msg: Any) -> Any:
             msg = _strip_message_thinking(msg)
-            return _apply_emulated_tool_calls(msg) if prompt_tools else msg
+            # 请求了工具但网关没填 tool_calls：再从正文里收 DSML / JSON。
+            if prompt_tools or (tools_orig and not getattr(msg, "tool_calls", None)):
+                return _apply_emulated_tool_calls(msg)
+            return msg
 
         kwargs: dict[str, Any] = {
             "model": self.config.model,
