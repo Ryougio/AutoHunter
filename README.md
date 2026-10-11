@@ -154,6 +154,12 @@
         <sub><b>kerlingcode</b></sub>
       </a><br /><sup>LLM Tool Calls</sup>
     </td>
+    <td align="center" width="100">
+      <a href="https://github.com/1ceS1amese">
+        <img src="https://avatars.githubusercontent.com/u/202466719?v=4&s=128" width="72" height="72" alt="1ceS1amese" /><br />
+        <sub><b>1ceS1amese</b></sub>
+      </a><br /><sup>Queue Cooling</sup>
+    </td>
   </tr>
 </table>
 
