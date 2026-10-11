@@ -137,6 +137,12 @@
         <sub><b>wr0x00</b></sub>
       </a><br /><sup>Proxy Pool</sup>
     </td>
+    <td align="center" width="100">
+      <a href="https://github.com/cnzxo">
+        <img src="https://avatars.githubusercontent.com/u/24584461?v=4&s=128" width="72" height="72" alt="cnzxo" /><br />
+        <sub><b>cnzxo</b></sub>
+      </a><br /><sup>WAL Checkpoint</sup>
+    </td>
   </tr>
 </table>
 

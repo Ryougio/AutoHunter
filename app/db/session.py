@@ -1,6 +1,7 @@
 """异步数据库会话管理（SQLite + aiosqlite）。"""
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import AsyncGenerator
@@ -39,6 +40,8 @@ _CONNECT_PRAGMAS = (
     "PRAGMA mmap_size=67108864;",         # 64MB mmap，避免把整库映射进 cgroup
     "PRAGMA temp_store=MEMORY;",          # ORDER BY/GROUP BY 临时表走内存
     "PRAGMA wal_autocheckpoint=1000;",
+    # checkpoint 之后把 WAL 文件截到上限。被动 autocheckpoint 只搬页，不缩小 -wal。
+    "PRAGMA journal_size_limit=268435456;",  # 256MB
 )
 
 
@@ -48,6 +51,9 @@ def _set_sqlite_pragma(dbapi_connection, _connection_record):
     try:
         for pragma in _CONNECT_PRAGMAS:
             cursor.execute(pragma)
+        # 库级设置，每条新连接再确认一次，避免混进非 WAL 连接。
+        cursor.execute("PRAGMA journal_mode=WAL;")
+        cursor.fetchone()
     finally:
         cursor.close()
 
@@ -271,3 +277,57 @@ async def _auto_migrate(conn) -> None:
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     async with SessionLocal() as session:
         yield session
+
+
+logger = logging.getLogger("autohunter.db")
+
+# 周期 checkpoint 间隔（秒）。默认 300；设为 0 关闭。
+# 思路来自 cnzxo：https://github.com/StanleyNull/AutoHunter/pull/85
+WAL_CHECKPOINT_INTERVAL = float(os.environ.get("AUTOHUNTER_WAL_CHECKPOINT_INTERVAL", "300"))
+_WAL_CHECKPOINT_MODES = frozenset({"PASSIVE", "FULL", "RESTART", "TRUNCATE"})
+
+
+async def checkpoint_wal(mode: str = "TRUNCATE") -> dict | None:
+    """把 WAL 页写回主库，并按模式截断 -wal 文件。
+
+    24x7 下读事务如果横跨测绘/LLM，会钉住 WAL 快照，被动 autocheckpoint 推不到头，
+    -wal 只增不减。这里用独立的 aiosqlite 连接执行，避开 SQLAlchemy 已经打开的事务
+    （wal_checkpoint 不能在事务里跑）。拿不到锁就返回 busy=1，不抛给主流程。
+    """
+    if mode not in _WAL_CHECKPOINT_MODES:
+        raise ValueError(f"unsupported wal checkpoint mode: {mode}")
+    import aiosqlite
+
+    try:
+        conn = await aiosqlite.connect(DB_PATH, timeout=5.0)
+        try:
+            await conn.execute("PRAGMA busy_timeout=5000;")
+            cursor = await conn.execute(f"PRAGMA wal_checkpoint({mode});")
+            row = await cursor.fetchone()
+            await cursor.close()
+        finally:
+            await conn.close()
+        if not row:
+            return None
+        return {"busy": int(row[0]), "log": int(row[1]), "checkpointed": int(row[2])}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("WAL checkpoint(%s) 失败：%s", mode, exc)
+        return None
+
+
+async def run_periodic_wal_checkpoint() -> None:
+    """后台按间隔做 TRUNCATE checkpoint，把 -wal 截断回收。"""
+    import asyncio
+
+    interval = WAL_CHECKPOINT_INTERVAL
+    if interval <= 0:
+        logger.info("WAL 周期 checkpoint 已关闭（AUTOHUNTER_WAL_CHECKPOINT_INTERVAL=0）")
+        return
+    while True:
+        await asyncio.sleep(interval)
+        result = await checkpoint_wal("TRUNCATE")
+        if result and result.get("checkpointed"):
+            logger.info(
+                "WAL checkpoint: 已回收 log=%d checkpointed=%d busy=%d",
+                result.get("log", 0), result.get("checkpointed", 0), result.get("busy", 0),
+            )

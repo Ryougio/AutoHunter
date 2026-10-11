@@ -977,6 +977,8 @@ class TaskRunner:
         # 小批探活：不必每次把最多 120 个候选全探完才派发一个 worker。
         # 高分优先的小批里一旦找到可打目标就立刻返回，剩余候选留给下一轮，
         # 避免一堆慢/死站把空闲 worker 卡在调度阶段。
+        # 探活走网络。先提交，别让读快照横跨这几秒。
+        await session.commit()
         for i in range(0, len(eligible), QUEUE_LIVENESS_BATCH_SIZE):
             batch = eligible[i:i + QUEUE_LIVENESS_BATCH_SIZE]
             liveness = await self._probe_queued_liveness(batch)

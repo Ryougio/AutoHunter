@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import threading
@@ -20,7 +21,7 @@ from app.agents.deepen import apply_deepen, deepen_cap_for
 from app.agents.write_proof import looks_like_write_op
 from app.settings_service import llm_client_for_task
 from app.db.models import Finding, Killsweep, Review, Target, Task, TaskEvent, to_cst_iso
-from app.db.session import get_session
+from app.db.session import SessionLocal, get_session
 from app.events import bus
 from app.killsweep_status import killsweep_retryable
 from app.llm.client import LLMClient, LLMError
@@ -29,6 +30,8 @@ from app.tools.executor import ToolExecutor
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+logger = logging.getLogger("autohunter.api.findings")
 
 router = APIRouter(prefix="/api", tags=["findings"])
 
@@ -689,6 +692,18 @@ def _llm_for_task(task: Task) -> LLMClient:
     return llm_client_for_task(task)
 
 
+def _detach_assistant_inputs(session: AsyncSession, *objs) -> None:
+    """把报告助手要读的 ORM 对象摘出会话。
+
+    助手最长跑数分钟。会话若一直开着，读快照会钉住 WAL。
+    摘出前列都已加载，线程里只读普通属性。任务对象继续传入，SRC 类型和附加规则不丢。
+    思路来自 cnzxo：https://github.com/StanleyNull/AutoHunter/pull/85
+    """
+    for obj in objs:
+        if obj is not None:
+            session.expunge(obj)
+
+
 def _assistant_context(f: Finding, r: Review | None, task: Task | None = None) -> str:
     rv = r
     edits = (rv.user_edits if rv else None) or {}
@@ -923,10 +938,12 @@ def _run_report_assistant(
     req: ReportAssistantRequest,
     cancel_event: threading.Event,
     emit=None,
+    llm: LLMClient | None = None,
 ) -> dict:
     """运行报告助手；emit(event:dict) 可选回调，每完成一步就推一条事件用于流式展示。
 
     使用与 Worker 相同的 llm_client_for_task：任务/全局端点池、failover、冷却均生效。
+    llm 由请求协程在释放会话前构造好再传入，线程里不再查库。
     LLMError（含池内全部端点失败）在此收敛为 answer，避免 SSE 路径把异常吞成「已完成」。
     """
     tool_logs: list[dict] = []
@@ -940,7 +957,8 @@ def _run_report_assistant(
                 pass
 
     try:
-        llm = _llm_for_task(task)
+        if llm is None:
+            llm = _llm_for_task(task)
         executor = ToolExecutor(f"report_assistant_{f.target_url or f.id}", cancel_event=cancel_event)
         messages = _build_assistant_messages(f, r, req, task)
         return _run_report_assistant_loop(llm, executor, messages, tool_logs, cancel_event, _emit)
@@ -1119,6 +1137,9 @@ async def report_assistant(finding_id: str, req: ReportAssistantRequest,
     if not persisted:
         persisted = _default_assistant_messages()
     llm_req = ReportAssistantRequest(message=msg, history=persisted[-_ASSISTANT_HISTORY_TURNS:])
+    llm = _llm_for_task(task)
+    _detach_assistant_inputs(session, f, r, task)
+    await session.rollback()
 
     loop = asyncio.get_running_loop()
     tool_logs = []
@@ -1129,7 +1150,7 @@ async def report_assistant(finding_id: str, req: ReportAssistantRequest,
     await assistant_sem.acquire()
     try:
         future = loop.run_in_executor(
-            AGENT_EXECUTOR, lambda: _run_report_assistant(f, r, task, llm_req, cancel_event),
+            AGENT_EXECUTOR, lambda: _run_report_assistant(f, r, task, llm_req, cancel_event, llm=llm),
         )
     except BaseException:
         assistant_sem.release()
@@ -1153,14 +1174,21 @@ async def report_assistant(finding_id: str, req: ReportAssistantRequest,
         assistant_content = _assistant_unavailable_message(e)
     except Exception as e:
         assistant_content = _assistant_unavailable_message(e)
-    f.assistant_messages = _sanitize_assistant_messages(
+    new_messages = _sanitize_assistant_messages(
         persisted + [{"role": "user", "content": msg}, {"role": "assistant", "content": assistant_content}],
     )
-    await session.commit()
+    try:
+        async with SessionLocal() as save_session:
+            row = await save_session.get(Finding, finding_id)
+            if row is not None:
+                row.assistant_messages = new_messages
+                await save_session.commit()
+    except Exception:
+        logger.warning("persist assistant messages failed finding=%s", finding_id, exc_info=True)
     return {
         "answer": assistant_content,
         "tool_logs": tool_logs,
-        "messages": f.assistant_messages,
+        "messages": new_messages,
     }
 
 
@@ -1188,6 +1216,9 @@ async def report_assistant_stream(finding_id: str, req: ReportAssistantRequest,
     if not persisted:
         persisted = _default_assistant_messages()
     llm_req = ReportAssistantRequest(message=msg, history=persisted[-_ASSISTANT_HISTORY_TURNS:])
+    llm = _llm_for_task(task)
+    _detach_assistant_inputs(session, f, r, task)
+    await session.rollback()
 
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
@@ -1203,7 +1234,7 @@ async def report_assistant_stream(finding_id: str, req: ReportAssistantRequest,
         try:
             future = loop.run_in_executor(
                 AGENT_EXECUTOR,
-                lambda: _run_report_assistant(f, r, task, llm_req, cancel_event, emit=_emit),
+                lambda: _run_report_assistant(f, r, task, llm_req, cancel_event, emit=_emit, llm=llm),
             )
         except BaseException:
             assistant_sem.release()
@@ -1274,15 +1305,19 @@ async def report_assistant_stream(finding_id: str, req: ReportAssistantRequest,
             suffix = f"\n\n（已执行 {tool_count} 个辅助动作）" if tool_count else ""
             stored = final_answer + suffix
             try:
-                f.assistant_messages = _sanitize_assistant_messages(
+                new_messages = _sanitize_assistant_messages(
                     persisted + [
                         {"role": "user", "content": msg},
                         {"role": "assistant", "content": stored},
                     ],
                 )
-                await session.commit()
+                async with SessionLocal() as save_session:
+                    row = await save_session.get(Finding, finding_id)
+                    if row is not None:
+                        row.assistant_messages = new_messages
+                        await save_session.commit()
             except Exception:
-                await session.rollback()
+                logger.warning("persist assistant stream failed finding=%s", finding_id, exc_info=True)
             yield _sse({
                 "type": "done",
                 "answer": stored,
