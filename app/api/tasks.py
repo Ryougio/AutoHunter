@@ -1,6 +1,7 @@
 """任务相关 API：创建 / 列表 / 详情 / 启停。"""
 from __future__ import annotations
 
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -41,6 +42,7 @@ from app.settings_service import (
 )
 from app.agents.deepen import clamp_deepen_cap
 
+logger = logging.getLogger("autohunter.tasks")
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
 # 任务级 worker 并发上限（与设置页 max=32、全局 WORKER_MAX_CONCURRENCY 对齐）。
@@ -1226,6 +1228,11 @@ async def stop_task(task_id: str, session: AsyncSession = Depends(get_session)):
         raise HTTPException(404, "任务不存在")
     task.status = "stopped"
     await session.commit()
-    await manager.stop(task_id)
-    await session.refresh(task)
+    try:
+        await manager.stop(task_id)
+        await session.refresh(task)
+    except Exception:
+        # 状态已经落库。收尾失败（主循环早先带着异常退出、回队写库失败）
+        # 不能再变成 500，否则前端不刷新，徽章继续停在运行中。
+        logger.exception("stop task runner failed task=%s", task_id)
     return _task_to_dto(task)

@@ -115,6 +115,9 @@ def _escalation_is_significant(orig_severity: str, res: dict) -> bool:
 
 
 LOOP_INTERVAL = 3.0
+# 连续这么多次「无法创建线程」就自动暂停。再空转只会把线程耗尽变成永久的
+# 「运行中、worker 为 0」，停止接口还会把退出异常返成 500。
+THREAD_EXHAUST_PAUSE_AFTER = 3
 LOW_WATERMARK = 5
 MAX_RETRY = 1  # 单 target 最多再挖 1 次
 # Worker 细粒度轨迹：运行中落库供刷新回看；worker 结束后由 maintenance.cleanup
@@ -409,6 +412,8 @@ class TaskRunner:
         self._llm_provider_retry_after: dict[str, float] = {}
         # 全池不可用是任务级条件；冷却期间不要让其它 queued 目标逐个启动再回队。
         self._llm_pool_retry_after: float = 0
+        # 连续 RuntimeError: can't start new thread 的次数。成功一轮就清零。
+        self._thread_exhaust_streak: int = 0
 
     def live_workers(self) -> list[dict]:
         return list(self._live.values())
@@ -684,27 +689,98 @@ class TaskRunner:
         )
 
     async def run_forever(self) -> None:
-        async with SessionLocal() as session:
-            await self.recover(session)
-        while not self._stop.is_set():
-            try:
-                await self._tick()
-            except Exception as exc:
-                tb = traceback.format_exc()
-                # 完整 traceback 只进后端日志（服务端可查），不写事件流，避免把 SQL
-                # 参数里的 leaked_creds 明文暴露到前端看板。
-                logger.warning("TaskRunner[%s] tick error:\n%s", self.task_id, tb)
-                summary = self._summarize_exc(exc)
-                async with SessionLocal() as s:
-                    if self._is_quota_error(tb):
-                        await self._stop_task_for_quota(s, tb)
-                        await self._log(s, "orchestrator", "quota_stop",
-                                        "LLM/API 额度不足，任务已自动停止", level="error")
+        crashed = False
+        try:
+            async with SessionLocal() as session:
+                await self.recover(session)
+            while not self._stop.is_set():
+                try:
+                    await self._tick()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    tb = traceback.format_exc()
+                    # 完整 traceback 只进后端日志（服务端可查），不写事件流，避免把 SQL
+                    # 参数里的 leaked_creds 明文暴露到前端看板。
+                    logger.warning("TaskRunner[%s] tick error:\n%s", self.task_id, tb)
+                    summary = self._summarize_exc(exc)
+                    thread_dead = (
+                        isinstance(exc, RuntimeError) and "can't start new thread" in str(exc)
+                    )
+                    if thread_dead:
+                        self._thread_exhaust_streak += 1
                     else:
-                        # 只记可读的异常摘要（类名+消息），不糊整条 SQL/参数。
-                        await self._log(s, "orchestrator", "error",
-                                        f"主循环异常: {summary}", level="error")
-            await asyncio.sleep(LOOP_INTERVAL)
+                        self._thread_exhaust_streak = 0
+                    try:
+                        async with SessionLocal() as s:
+                            if self._is_quota_error(tb):
+                                await self._stop_task_for_quota(s, tb)
+                                await self._log(s, "orchestrator", "quota_stop",
+                                                "LLM/API 额度不足，任务已自动停止", level="error")
+                            else:
+                                # 只记可读的异常摘要（类名+消息），不糊整条 SQL/参数。
+                                await self._log(s, "orchestrator", "error",
+                                                f"主循环异常: {summary}", level="error")
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        # 记错误本身也要开一条 aiosqlite 连接（一条一个线程）。
+                        # 线程耗尽时这里会再抛 RuntimeError: can't start new thread。
+                        # 这个异常若逃出主循环，任务停在 running、worker 为 0；
+                        # 之后点停止会把已结束任务的异常 await 出来，接口变成 500，
+                        # 前端不刷新，看板就一直显示运行中。
+                        logger.exception(
+                            "TaskRunner[%s] failed to persist tick error", self.task_id
+                        )
+                    if (
+                        self._thread_exhaust_streak >= THREAD_EXHAUST_PAUSE_AFTER
+                        and not self._stop.is_set()
+                    ):
+                        await self._pause_after_loop_exit(
+                            "连续无法创建线程，任务已自动暂停，可重新启动"
+                        )
+                        self._stop.set()
+                        break
+                else:
+                    self._thread_exhaust_streak = 0
+                await asyncio.sleep(LOOP_INTERVAL)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            crashed = True
+            logger.exception("TaskRunner[%s] loop exited", self.task_id)
+        finally:
+            if crashed and not self._stop.is_set():
+                await self._pause_after_loop_exit()
+
+    async def _pause_after_loop_exit(self, reason: str = "主循环异常退出，任务已自动暂停，可重新启动") -> None:
+        """主循环意外退出时把 running/idle 收成暂停，避免看板永远显示运行中。"""
+        try:
+            async with SessionLocal() as session:
+                task = await session.get(Task, self.task_id)
+                if not task or task.status not in ("running", "idle"):
+                    return
+                task.status = "paused"
+                await session.commit()
+                await self._log(session, "orchestrator", "auto_paused", reason, level="error")
+        except Exception:
+            logger.exception("TaskRunner[%s] failed to pause after loop exit", self.task_id)
+
+    async def _committed_status_halted(self) -> bool:
+        """其它事务是否已经把任务停掉或暂停。
+
+        必须用独立连接。本轮 tick 的 session 还拿着开头读到的 running 快照，
+        看那份快照会把用户刚提交的 stopped 盖回 idle/running。
+        """
+        try:
+            async with SessionLocal() as session:
+                status = (await session.execute(
+                    select(Task.status).where(Task.id == self.task_id)
+                )).scalar_one_or_none()
+        except Exception:
+            logger.exception("TaskRunner[%s] failed to read committed status", self.task_id)
+            return False
+        return status in ("paused", "stopped")
 
     async def _tick(self) -> None:
         async with SessionLocal() as session:
@@ -778,6 +854,8 @@ class TaskRunner:
                 from app.engines.sync import engine_display_name
                 disp = engine_display_name(resolve_engine_name(task))
                 reason = f"{disp} 账号连续 {fofa_fail} 次无效，已自动暂停任务，请检查/更换 {disp} key 后重新启动"
+                if await self._committed_status_halted():
+                    return
                 task.status = "paused"
                 await session.commit()
                 await self._log(session, "orchestrator", "auto_paused", f"{reason}（最后错误：{last_err}）",
@@ -793,6 +871,8 @@ class TaskRunner:
                 from app.engines.sync import engine_display_name
                 disp = engine_display_name(resolve_engine_name(task))
                 reason = f"{disp} 每日额度耗尽，连续 {dl_count} 次（约 {dl_count} 小时）未恢复，已自动暂停任务"
+                if await self._committed_status_halted():
+                    return
                 task.status = "paused"
                 await session.commit()
                 await self._log(session, "orchestrator", "auto_paused", f"{reason}（最后错误：{last_err}）",
@@ -841,6 +921,10 @@ class TaskRunner:
             # 空闲、实际还有目标虚挂，直到 reclaim(最多 ~150s)才回收——保持 running 更真实。
             inflight = await self._count_inflight(session)
             busy = bool(self._active_workers) or inflight > 0
+            # 长 tick（探活/搜集）期间用户可能已经点了停止或暂停。这里的 task.status
+            # 是本轮开头的快照，直接写成 idle/running 会把已提交的 stopped 盖回去。
+            if await self._committed_status_halted():
+                return
             if queued == 0 and not busy and task.status == "running":
                 if task.status != "idle":
                     task.status = "idle"
@@ -1374,28 +1458,32 @@ class TaskRunner:
                 task.cancel()
             self._live.pop(tid, None)
 
-        async with SessionLocal() as session:
-            rows = (await session.execute(
-                select(Target).where(Target.task_id == self.task_id, Target.id.in_(target_ids))
-            )).scalars().all()
-            for tgt in rows:
-                if tgt.status in ("assigned", "scanning"):
-                    tgt.status = "queued"
-                    tgt.verdict = ""
-                    tgt.assigned_worker = ""
-                    tgt.heartbeat_at = None
-                    tgt.last_error = reason[:500]
-                    tgt.dead_reason = ""
-            await session.commit()
-            await self._log(
-                session, "orchestrator", "workers_cancelled",
-                f"{reason}，已收回 {len(rows)} 个目标",
-                level="warn", count=len(rows),
-            )
-
-        self._active_workers.clear()
-        for tid in target_ids:
-            self._worker_cancel_events.pop(tid, None)
+        try:
+            async with SessionLocal() as session:
+                rows = (await session.execute(
+                    select(Target).where(Target.task_id == self.task_id, Target.id.in_(target_ids))
+                )).scalars().all()
+                for tgt in rows:
+                    if tgt.status in ("assigned", "scanning"):
+                        tgt.status = "queued"
+                        tgt.verdict = ""
+                        tgt.assigned_worker = ""
+                        tgt.heartbeat_at = None
+                        tgt.last_error = reason[:500]
+                        tgt.dead_reason = ""
+                await session.commit()
+                await self._log(
+                    session, "orchestrator", "workers_cancelled",
+                    f"{reason}，已收回 {len(rows)} 个目标",
+                    level="warn", count=len(rows),
+                )
+        except Exception:
+            # 回队写库失败不能挡住停止。协程已经 cancel，状态接口仍要能返回。
+            logger.exception("TaskRunner[%s] failed to requeue cancelled workers", self.task_id)
+        finally:
+            self._active_workers.clear()
+            for tid in target_ids:
+                self._worker_cancel_events.pop(tid, None)
 
     async def skip_target(self, target_id: str, reason: str = "用户手动删除该目标") -> dict:
         """人工从看板删除某个目标：取消其在跑 worker（若有），并把目标标记 skipped——
@@ -3811,12 +3899,23 @@ class OrchestratorManager:
     async def stop(self, task_id: str) -> None:
         runner = self._runners.pop(task_id, None)
         if runner:
-            await runner.stop()
+            try:
+                await runner.stop()
+            except Exception:
+                logger.exception("runner stop failed task=%s", task_id)
         t = self._tasks.pop(task_id, None)
-        if t:
+        if not t:
+            return
+        if not t.done():
             t.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await t
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            # 主循环已经带着异常结束时，再 await 会把那个异常抛回停止接口。
+            # 状态在此之前已经写成 stopped，这里不能再变成 500。
+            logger.warning("runner task already failed task=%s", task_id, exc_info=True)
 
     async def pause(self, task_id: str) -> None:
         runner = self._runners.get(task_id)

@@ -855,13 +855,19 @@ function elapsed(iso) {
 }
 
 async function ctl(action) {
+  const labels = { start: "已启动", pause: "已暂停", stop: "已停止" };
+  let failed = null;
   try {
     await api[action](props.id);
-    toast(action === "start" ? "已启动" : action === "pause" ? "已暂停" : "已停止");
-    await Promise.all([loadTask(), loadBoard()]);
   } catch (e) {
-    toast(`操作失败：${e?.message || e}`);   // 403/网络失败给用户反馈，别静默
+    failed = e;
   }
+  // 停止接口即使 500，库里的状态也可能已经写成 stopped。失败也要重新拉，
+  // 否则徽章停在运行中，启动按钮还是灰的，只能绕去暂停再启动。
+  try { await loadTask(); } catch { /* 状态同步失败时保留当前展示 */ }
+  try { await loadBoard(); } catch { /* 看板失败不挡住状态 */ }
+  if (failed) toast(`操作失败：${failed?.message || failed}，已重新同步状态`);
+  else toast(labels[action] || "已完成");
 }
 
 function openEdit() {
