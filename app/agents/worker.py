@@ -159,7 +159,7 @@ class Worker:
         if title:
             lines.append(f"- 站点标题：{title}")
         if source == "killsweep":
-            lines.append("- 来源：通杀验证目标（已由通杀 Hunter 找到同款系统并验证过 1 个点）")
+            lines.append("- 来源：通杀验证目标（已由通杀分析找到同款系统并验证过 1 个点）")
             if priority_reason:
                 lines.append(f"- 通杀上下文：{priority_reason}")
             lines.append("注意：你只负责把当前站点的实际漏洞证据打出来，不要围绕该产品继续做通杀扩散判断。")

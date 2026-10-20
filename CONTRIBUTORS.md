@@ -47,6 +47,9 @@
 | <img src="https://avatars.githubusercontent.com/u/7687111?v=4&s=64" width="40" height="40" alt="vtaskstar" /> | [@vtaskstar](https://github.com/vtaskstar) | LLM_EXTRA_HEADERS 自定义请求头（opencode Go 等网关） |
 | <img src="https://avatars.githubusercontent.com/u/173699449?v=4&s=64" width="40" height="40" alt="Windsweet97" /> | [@Windsweet97](https://github.com/Windsweet97) | Helper |
 | <img src="https://avatars.githubusercontent.com/u/86941613?v=4&s=64" width="40" height="40" alt="wr0x00" /> | [@wr0x00](https://github.com/wr0x00) | 代理池 [#60](https://github.com/StanleyNull/AutoHunter/pull/60) |
+| <img src="https://avatars.githubusercontent.com/u/24584461?v=4&s=64" width="40" height="40" alt="cnzxo" /> | [@cnzxo](https://github.com/cnzxo) | SQLite WAL 回收 [#85](https://github.com/StanleyNull/AutoHunter/pull/85) |
+| <img src="https://avatars.githubusercontent.com/u/21171415?v=4&s=64" width="40" height="40" alt="kerlingcode" /> | [@kerlingcode](https://github.com/kerlingcode) | DeepSeek 兼容端点工具调用 [#75](https://github.com/StanleyNull/AutoHunter/issues/75) |
+| <img src="https://avatars.githubusercontent.com/u/202466719?v=4&s=64" width="40" height="40" alt="1ceS1amese" /> | [@1ceS1amese](https://github.com/1ceS1amese) | 5xx 冷却不占队列水位 [#73](https://github.com/StanleyNull/AutoHunter/issues/73) |
 
 <!-- 新贡献者请在上一行表格末尾追加，保持格式一致 -->
 

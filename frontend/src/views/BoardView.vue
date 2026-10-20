@@ -494,6 +494,17 @@ async function toggleEventExpand(ev, i) {
   }
 }
 
+function sweepEngineLabel(name) {
+  return ({
+    fofa: "FOFA",
+    quake: "360 Quake",
+    hunter: "Hunter",
+    zoomeye: "ZoomEye",
+    shodan: "Shodan",
+    censys: "Censys",
+  })[name] || name || "测绘";
+}
+
 // 把任意事件格式化为一句人话（worker 动作事件本身没有 message）
 function fmtEvent(ev) {
   if (ev.message) return ev.message;
@@ -515,7 +526,7 @@ function fmtEvent(ev) {
     case "review_cancelled": return `审核已取消`;
     case "reproduce_start": return `复现验证: ${d.title || ""}`;
     case "reproduce_done": return `复现${d.reproduced ? "成功" : "未证实"}: ${d.title || ""}`;
-    case "killsweep_start": return `通杀 Hunter 启动：${d.title || ""}`;
+    case "killsweep_start": return `通杀启动（${sweepEngineLabel(d.engine || task.value?.engine)}）：${d.title || ""}`;
     case "killsweep_done": return `通杀分析完成：${d.product || ""} · ${d.is_killsweep ? "可通杀" : "不可通杀"}`;
     case "killsweep_error": return `通杀分析异常: ${(d.error || "").slice(0, 120)}`;
     case "killsweep_dedup": return `通杀分析去重：${d.product || ""}`;
@@ -844,13 +855,19 @@ function elapsed(iso) {
 }
 
 async function ctl(action) {
+  const labels = { start: "已启动", pause: "已暂停", stop: "已停止" };
+  let failed = null;
   try {
     await api[action](props.id);
-    toast(action === "start" ? "已启动" : action === "pause" ? "已暂停" : "已停止");
-    await Promise.all([loadTask(), loadBoard()]);
   } catch (e) {
-    toast(`操作失败：${e?.message || e}`);   // 403/网络失败给用户反馈，别静默
+    failed = e;
   }
+  // 停止接口即使 500，库里的状态也可能已经写成 stopped。失败也要重新拉，
+  // 否则徽章停在运行中，启动按钮还是灰的，只能绕去暂停再启动。
+  try { await loadTask(); } catch { /* 状态同步失败时保留当前展示 */ }
+  try { await loadBoard(); } catch { /* 看板失败不挡住状态 */ }
+  if (failed) toast(`操作失败：${failed?.message || failed}，已重新同步状态`);
+  else toast(labels[action] || "已完成");
 }
 
 function openEdit() {
@@ -998,7 +1015,7 @@ function assetRows(k) {
       host: "",
       vuln_title: k.vuln_summary || k.origin_title || "通杀验证目标",
       status: k.verified ? "verified" : "candidate",
-      evidence: k.verified ? "通杀 Hunter 已验证" : "通杀 Hunter 圈定候选",
+      evidence: k.verified ? "通杀已验证" : "通杀圈定候选",
     }];
   }
   return [];

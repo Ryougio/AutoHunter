@@ -110,6 +110,19 @@ class ReportAssistantTest(unittest.TestCase):
         finally:
             findings._llm_for_task = old_llm
 
+    def test_assistant_context_keeps_task_rules(self):
+        text = findings._assistant_context(
+            SimpleNamespace(
+                title="t", vuln_type="xss", target_url="https://example.com", owner="demo",
+                severity_claimed="高危", description="", affected_scope="", steps=[], poc="",
+                raw_request="", raw_response="", evidence={}, kill_chain=[], self_check={},
+            ),
+            None,
+            SimpleNamespace(src_type="enterprise", src_rules="只测授权范围"),
+        )
+        self.assertIn("enterprise", text)
+        self.assertIn("只测授权范围", text)
+
     def test_normalize_proposed_edits_keeps_usable_fields(self):
         out = findings._normalize_proposed_edits({
             "title": "  越权查看他人订单  ",

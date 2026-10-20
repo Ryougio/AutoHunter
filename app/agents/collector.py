@@ -27,6 +27,7 @@ from app.agents.manual_targets import parse_manual_targets
 from app.agents.prompts import is_enterprise_src
 from app.agents.scope_anchors import extract_enterprise_domains, extract_scope_anchors
 from app.db.models import Target, Task
+from app.queue_policy import ready_queue_clause
 from app.engines import get_engine, QuakeRateLimitError
 from app.engines.translator import (
     looks_like_fofa_syntax,
@@ -318,7 +319,7 @@ async def refill(session: AsyncSession, task: Task, low_watermark: int = 5,
     """补充目标。返回新入队数量。队列够则不补。"""
     queued = (await session.execute(
         select(func.count()).select_from(Target).where(
-            Target.task_id == task.id, Target.status == "queued")
+            Target.task_id == task.id, ready_queue_clause())
     )).scalar() or 0
     if queued >= low_watermark:
         # 上次大批量入队若被 stop/取消打断，看板会永久停在「正在入队 8000/8025」。
@@ -354,6 +355,9 @@ async def refill(session: AsyncSession, task: Task, low_watermark: int = 5,
     seen = await _existing_hosts(session, task.id)
     cluster_state = await _existing_cluster_state(session, task.id)
     added = 0
+    # 上面是只读。后面有泄露查询、测绘和探活，先结束读事务，避免快照钉住 WAL。
+    # 思路来自 cnzxo：https://github.com/StanleyNull/AutoHunter/pull/85
+    await session.commit()
 
     # 单站协作：同一个真实 host 按路线拆成多个 worker，不走 FOFA 翻页。
     if task.target_source == "site":
@@ -561,6 +565,7 @@ async def _site_collect(
                 auth_context=_auth_context_for(task, url),
             ))
             added += 1
+        await session.commit()
     return added
 
 
@@ -642,6 +647,8 @@ async def _fofa_collect(
             task.fofa_config = {**cfg}
             return 0
         prev_query = cur_query
+        # 生成语法要调 LLM。先提交，别让读快照横跨这次网络请求。
+        await session.commit()
         new_q, reason = await _resolve_query(task, llm)
         if not new_q:
             cfg["fofa_exhausted"] = True
@@ -707,6 +714,8 @@ async def _fofa_collect(
         cfg.pop("engine_cursor", None)
     cfg["translated_query"] = native_query
 
+    # 测绘检索是网络 IO。提交后再发请求，避免读快照钉住 WAL。
+    await session.commit()
     try:
         res = await engine.search(
             key,
@@ -748,6 +757,7 @@ async def _fofa_collect(
         _is_daily_limit = any(m in err_lower for m in (
             "820041", "每日", "上限", "每天限制", "daily limit", "daily_limit",
             "exceeded daily", "daily quota", "每天额度",
+            "今日调用次数已用完", "今日查询次数已用完",
         ))
         if _is_daily_limit:
             dl_count = int(cfg.get("daily_limit_count", 0)) + 1
@@ -975,7 +985,8 @@ async def _fofa_collect(
     cfg.pop("empty_query_streak", None)
     cfg.pop("fofa_exhausted", None)
 
-    # 机械预筛（并发探活，过滤 CDN/死链/纯前端）
+    # 机械预筛（并发探活，过滤 CDN/死链/纯前端）。先收口，探活期间不持有读快照。
+    await session.commit()
     await report("prefilter", f"正在探活预筛 {len(candidates)} 个候选目标", candidates=len(candidates))
     survivors = await _prefilter(candidates)
     await report(
@@ -1102,6 +1113,7 @@ async def _fofa_collect(
                collector_phase="dispatch",
                collector_phase_text=f"目标过滤完成：入队 {added} 个，过滤 {skipped_filter} 个，低分跳过 {skipped_low} 个")
     task.fofa_config = cfg
+    await session.commit()
     return added
 
 

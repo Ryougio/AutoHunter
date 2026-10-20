@@ -137,6 +137,29 @@
         <sub><b>wr0x00</b></sub>
       </a><br /><sup>Proxy Pool</sup>
     </td>
+    <td align="center" width="100">
+      <a href="https://github.com/cnzxo">
+        <img src="https://avatars.githubusercontent.com/u/24584461?v=4&s=128" width="72" height="72" alt="cnzxo" /><br />
+        <sub><b>cnzxo</b></sub>
+      </a><br /><sup>WAL Checkpoint</sup>
+    </td>
+  </tr>
+</table>
+
+<table>
+  <tr>
+    <td align="center" width="100">
+      <a href="https://github.com/kerlingcode">
+        <img src="https://avatars.githubusercontent.com/u/21171415?v=4&s=128" width="72" height="72" alt="kerlingcode" /><br />
+        <sub><b>kerlingcode</b></sub>
+      </a><br /><sup>LLM Tool Calls</sup>
+    </td>
+    <td align="center" width="100">
+      <a href="https://github.com/1ceS1amese">
+        <img src="https://avatars.githubusercontent.com/u/202466719?v=4&s=128" width="72" height="72" alt="1ceS1amese" /><br />
+        <sub><b>1ceS1amese</b></sub>
+      </a><br /><sup>Queue Cooling</sup>
+    </td>
   </tr>
 </table>
 
@@ -170,8 +193,8 @@ Powered By **StanleyNull** · 作者 EduSRC 主页：<https://src.sjtu.edu.cn/pr
 </div>
 
 > [!WARNING]
-> **仅限对已获明确书面授权的目标使用。** 本工具采用 Apache License 2.0，滥用后果自负。
-还有，本工具做了删除限制，但是仍有可能在某些外部情况如模型自主意愿等情况下修改或删除少量数据，本工具造成的一切后果请后果自负，请在完全了解的情况下使用!使用本工具出现的问题可以提出意见我来修改，但请不要怪到我本人或者我们团队🤔
+> **只测已经书面授权的目标。** 本工具采用 Apache License 2.0，未授权使用的后果由使用者承担。
+> 删除操作有限制，但模型仍可能在个别情况下改动或删除少量数据。使用即表示你了解并自行承担后果。问题请提 Issue。
 
 > [!NOTE]
 > 🌱 抛砖引玉，欢迎 Star / Issue / 二次开发。
@@ -206,7 +229,7 @@ flowchart LR
     R -->|回炉深挖| W
     R -.->|垃圾/误报| X["🗑️ 丢弃"]
     H -->|通过| S["📤 待提交清单"]
-    H -->|通过| K["💥 通杀 Hunter<br/>一打一片"]
+    H -->|通过| K["💥 通杀分析<br/>一打一片"]
     K -.->|同款验证| W
 ```
 
@@ -226,7 +249,7 @@ flowchart LR
 | 🔧 **真实工具链挖洞** | 容器内置 nmap · nuclei · sqlmap · httpx · whatweb，LLM 真实发包/执行，不是纸上谈兵 |
 | 🧪 **极理性 AI 初审** | 只认「实际可利用 + 实锤危害」，过滤半成品，减少无效人工复审 |
 | 🏫 **归属证明** | 按 IP/域名查 [ip138](https://www.ip138.com/)（标记/运营商/ASN 归属地），自动填报告归属单位与证明 + EduSRC 提交 JSON |
-| 💥 **通杀 Hunter** | 出洞后自动分析能否「一打一片」，实打多个同款站点验证 |
+| 💥 **通杀分析** | 出洞后按任务所选测绘引擎圈定同款系统，实打多个站点验证能否一打一片 |
 | 🧠 **情报沉淀复用** | 验证过的凭证/端点/指纹入全局情报库，后续 Worker 直接复用 |
 | 🛡️ **内置 WAF + 鉴权** | 应用层 WAF 默认开启，多角色访问令牌（全权/只读/观摩） |
 | 💾 **数据库备份** | 设置页一键下载/恢复 SQLite（在线一致快照），可选打包工作目录，服务器定时留快照 |
@@ -334,7 +357,7 @@ docker compose logs -f autohunter   # 看启动日志
 body="管理" && org="China Education and Research Network Center"
 ```
 
-**② 不会写语法，只想说要找什么** → 选 `自然语言意图`，用大白话描述，搜集 Agent 自动翻译成 FOFA 语法并逐轮演化：
+**② 不会写语法，只想说要找什么** → 选 `自然语言意图`，用大白话描述。搜集模型会把它写成 **FOFA 语法** 并逐轮演化，因此这种方式适合引擎选 FOFA。换了 Quake / Hunter 等引擎时，请改用「查询语法」，自己写该引擎的官网语句。
 
 ```text
 找全国高校的统一身份认证登录系统
@@ -357,10 +380,7 @@ body="管理" && org="China Education and Research Network Center"
 
 组合逻辑：`&&`（且）、`||`（或）、`!=`（非）。**语句越精确、归属越收窄，Worker 越不会打到范围外资产。**
 
-任务里还可把搜索引擎换成 **360 Quake / Hunter / ZoomEye / Shodan / Censys**（设置页配对应 Key）。查询框两种写法都认：
-
-1. **FOFA 语法**（推荐统一这么写）→ 请求前自动翻译到当前引擎
-2. **该引擎官网原生语法** → 识别后原样请求，不再二次翻译
+任务里还可把搜索引擎换成 **360 Quake / Hunter / ZoomEye / Shodan / Censys**（设置页配对应 Key）。语句按**当前引擎官网语法原样发送**，不会把 FOFA 语法自动改写成别的引擎。
 
 | 引擎 | 原生示例 | Key |
 |------|----------|-----|
@@ -370,7 +390,7 @@ body="管理" && org="China Education and Research Network Center"
 | Shodan | `http.title:"nginx" port:443` | `SHODAN_KEY`（需 Search API 权限） |
 | Censys | `host.dns.names: edu.cn` | `CENSYS_KEY`（Platform Personal Access Token；旧账号才用 `API_ID:SECRET`） |
 
-> 选了 Quake 却从官网粘 `title:"xxx" AND ...` 时，请把搜集方式设为「查询语法」或保持自动判断——系统会按原生语法直发，不再当成自然语言改写。
+> 选了哪个引擎，就写哪个引擎的语法。Hunter 的 `web.title=`、Quake 的 `title:"…" AND` 会原样发出去；把 FOFA 的 `body=` / `title=` 贴到这些引擎上，不会被翻译，请求会失败。
 
 > [!IMPORTANT]
 > **务必收窄授权范围**：只搜你有权限测试的资产。`org` / `domain` / `cert` 是最有效的归属过滤手段。

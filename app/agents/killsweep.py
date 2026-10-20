@@ -35,6 +35,21 @@ def _normalize_host(url_or_host: str) -> str:
         return (url_or_host or "").lower().strip("/")
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    """模型常把规模写成「很多」或带逗号的字符串，不能因此让 submit 抛掉整轮结论。"""
+    if isinstance(value, bool) or value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip().replace(",", "")
+    if not text:
+        return default
+    try:
+        return int(float(text))
+    except (TypeError, ValueError):
+        return default
+
+
 def _affected_row_key(host: str, vuln_title: str, vuln_type: str) -> str:
     raw = f"killsweep|{host}|{(vuln_type or '').lower()}|{vuln_title or ''}"
     return hashlib.md5(raw.encode()).hexdigest()
@@ -151,11 +166,23 @@ class KillsweepHunter:
             f"- 描述：{(f.get('description') or '')[:600]}\n"
             f"- PoC：{(f.get('poc') or '')[:500]}\n"
             f"- 原始响应(片段)：{(f.get('raw_response') or '')[:800]}\n\n"
-            f"请分析这套系统能否通杀。先认指纹→FOFA 圈定+统计→实打验证几个（2~4 个）可达同款站点（能验的多验几个）→调 submit_killsweep 下结论。"
+            f"测绘引擎：{self._engine_label()}。fofa_search 只打这个引擎。\n"
+            f"请分析这套系统能否通杀。先认指纹→用该引擎圈定+统计→实打验证几个（2~4 个）可达同款站点（能验的多验几个）→调 submit_killsweep 下结论。"
         )
 
+    def _engine_label(self) -> str:
+        from app.engines.sync import engine_display_name
+        return engine_display_name(self.engine)
+
     def run(self) -> KillsweepResult:
-        self._emit("killsweep_start", title=self.finding.get("title", ""))
+        title = self.finding.get("title", "")
+        label = self._engine_label()
+        self._emit(
+            "killsweep_start",
+            title=title,
+            engine=self.engine,
+            message=f"通杀启动（{label}）：{title}",
+        )
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": killsweep_system_prompt(self.src_type)},
             {"role": "user", "content": self._brief()},
@@ -166,9 +193,24 @@ class KillsweepHunter:
                 self.executor.cancel_running()
                 return KillsweepResult({"error": "通杀分析已被取消"})
             rounds += 1
+            # 最后一轮只允许交结论。否则模型会把轮数耗在重复测绘上，最后报「未给出结论」。
+            closing = _MAX_ROUNDS > 0 and rounds >= _MAX_ROUNDS
+            if closing:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "轮数已到上限。不要再调用 fofa_search、http_request、run_shell。"
+                        "现在立刻调用 submit_killsweep。"
+                        "同款没圈到、站点不可达或证据不足时，is_killsweep=false，confidence=uncertain，notes 写明原因。"
+                    ),
+                })
+            tool_choice: Any = (
+                {"type": "function", "function": {"name": "submit_killsweep"}}
+                if closing else "auto"
+            )
             try:
                 send_messages = compact_messages(messages, rounds)
-                msg = self.llm.chat(send_messages, tools=KILLSWEEP_TOOL_SCHEMAS, tool_choice="auto")
+                msg = self.llm.chat(send_messages, tools=KILLSWEEP_TOOL_SCHEMAS, tool_choice=tool_choice)
             except Exception as e:
                 self._emit("killsweep_error", error=str(e))
                 return KillsweepResult({"error": f"LLM 调用失败: {e}"})
@@ -254,8 +296,8 @@ class KillsweepHunter:
                 "confidence": args.get("confidence", "uncertain"),
                 "fofa_query": args.get("fofa_query", ""),
                 "fingerprint": args.get("fingerprint", ""),
-                "asset_count": int(args.get("asset_count", 0) or 0),
-                "edu_count": int(args.get("edu_count", 0) or 0),
+                "asset_count": _safe_int(args.get("asset_count", 0)),
+                "edu_count": _safe_int(args.get("edu_count", 0)),
                 "verified_url": args.get("verified_url", ""),
                 "verified": bool(args.get("verified", False)),
                 "affected_table": _normalize_affected_table(args.get("affected_table", []), self.finding.get("vuln_type", "")),
